@@ -1,0 +1,1531 @@
+/*
+ * eco library (client)
+ *
+ * semanticanalyser.eco
+ */
+
+using std;
+
+namespace eco
+{
+
+
+	/** Semantic analyser */
+	class SemanticAnalyser
+	{
+		new(SymbolTable serverSymbolTable, SymbolTable clientSymbolTable, SymbolTable sharedSymbolTable)
+		{
+			_serverSymbolTable = serverSymbolTable;
+			_clientSymbolTable = clientSymbolTable;
+			_sharedSymbolTable = sharedSymbolTable;
+
+			_namespaces = [];
+			_verifier = new Verifier(this);
+
+			// Setup basic types if they don't exist yet
+			var dummy = Interface.BasicTypes();
+		}
+
+		ParserError[] Errors : private _errors = []
+		{
+			get return _errors;
+		}
+
+
+		string FileName : private _fileName
+		{
+			get return _fileName;
+			set _fileName = value;
+		}
+
+		string FileID : private _fileId
+		{
+			get return _fileId;
+			set _fileId = value;
+		}
+
+		SymbolTable ServerSymbolTable : private _serverSymbolTable
+		{
+			get return _serverSymbolTable;
+		}
+
+		SymbolTable ClientSymbolTable : private _clientSymbolTable
+		{
+			get return _clientSymbolTable;
+		}
+
+		SymbolTable SharedSymbolTable : private _sharedSymbolTable
+		{
+			get return _sharedSymbolTable;
+		}
+
+		SymbolTable CurrentSymbolTable : private _currentSymbolTable
+		{
+			get return _currentSymbolTable;
+			set _currentSymbolTable = value;
+		}
+
+
+		Verifier Verifier : private _verifier
+		{
+			get return _verifier;
+		}
+
+		/** Use namespaces for current file. Cleared after file has been built */
+		void UseNamespaces(string fileId, SymbolTable symbolTable, TypeNode[] nodes)
+		{
+			symbolTable.ClearUsings();
+
+			foreach (var used in nodes)
+			{
+				var found = symbolTable.GetNamespaceFromTypeNode(used);
+				if (found)
+				{
+					if (found.Type == SymbolType.Namespace || found.Type == SymbolType.SymbolTable)
+						symbolTable.UseNamespace(found);
+					else
+						Error(fileId, "Cannot use '" + found.Name + "' as it is not a namespace", used);
+				}
+				else
+					Error(fileId, "Cannot find namespace '" + used.Name + "'", used);
+			}
+		}
+
+		void BuildSkeleton(string fileId, SymbolTable symbolTable, NamespaceNode[] nodes)
+		{
+			_currentSymbolTable = symbolTable;
+			symbolTable.RefreshSpan();
+			//symbolTable.RefreshFile(fileId);
+			_namespaces = [];
+			_classes = [];
+
+
+			// Skeleton
+			foreach (var node in nodes)
+			{
+				switch (node.Type)
+				{
+					case ASTType.Namespace:
+					{
+						BuildNamespaceSkeleton(fileId, symbolTable, (NamespaceNode)node);
+						break;
+					}
+
+					case ASTType.Interface:
+					{
+						BuildInterfaceSkeleton(fileId, symbolTable, (InterfaceNode)node);
+						break;
+					}
+
+					case ASTType.Class:
+					{
+						BuildClassSkeleton(fileId, symbolTable, (ClassNode)node);
+						break;
+					}
+
+					case ASTType.ServerComponent:
+					{
+						BuildServerComponentSkeleton(fileId, symbolTable, (ComponentServerNode)node);
+						break;
+					}
+
+					case ASTType.ClientComponent:
+					{
+						BuildClientComponentSkeleton(fileId, symbolTable, (ComponentClientNode)node);
+						break;
+					}
+
+					case ASTType.Initialiser:
+					{
+						BuildInitialiserSkeleton(fileId, symbolTable, (InitialiserNode)node);
+						break;
+					}
+
+					case ASTType.Service:
+					{
+						BuildServiceSkeleton(fileId, symbolTable, (ServiceNode)node);
+						break;
+					}
+
+					case ASTType.Enum:
+					{
+						BuildEnum(fileId, symbolTable, (EnumNode)node);
+						break;
+					}
+
+					case ASTType.Template:
+					{
+						BuildTemplateSkeleton(fileId, symbolTable, (TemplateNode)node);
+						break;
+					}
+				}
+			}
+		}
+
+		object BuildFull(string fileId, SymbolTable symbolTable, NamespaceNode[] nodes)
+		{
+			_currentSymbolTable = symbolTable;
+
+			_membersToBuild = [];
+			_interfaceMembersToBuild = [];
+			_methods = [];
+			_properties = [];
+			_classes = [];
+
+			//Namespace.ClearStaticData();
+
+			// High-level symbols
+			foreach (var node in nodes)
+			{
+				switch (node.Type)
+				{
+					case ASTType.Namespace:
+					{
+						BuildNamespace(fileId, (Namespace)symbolTable, (NamespaceNode)node);
+						break;
+					}
+
+					case ASTType.Interface:
+					{
+						BuildInterface(fileId, (Namespace)symbolTable, (InterfaceNode)node);
+						break;
+					}
+
+					case ASTType.Class:
+					{
+						BuildClass(fileId, (Namespace)symbolTable, (ClassNode)node);
+						break;
+					}
+
+					case ASTType.ServerComponent:
+					{
+						BuildServerComponent(fileId, (Namespace)symbolTable, (ComponentServerNode)node);
+						break;
+					}
+
+					case ASTType.ClientComponent:
+					{
+						BuildClientComponent(fileId, (Namespace)symbolTable, (ComponentClientNode)node);
+						break;
+					}
+
+					case ASTType.Initialiser:
+					{
+						BuildInitialiser(fileId, (Namespace)symbolTable, (InitialiserNode)node);
+						break;
+					}
+
+					case ASTType.Service:
+					{
+						BuildService(fileId, (Namespace)symbolTable, (ServiceNode)node);
+						break;
+					}
+
+					case ASTType.Template:
+					{
+						BuildTemplate(fileId, (Namespace)symbolTable, (TemplateNode)node);
+						break;
+					}
+
+					case ASTType.Enum:
+					{
+						BuildEnum(fileId, symbolTable, (EnumNode)node);
+						break;
+					}
+
+					case ASTType.Typedef:
+					{
+						var typeDefNode = (TypedefNode)node;
+						var typeDef = new TypeDef(typeDefNode.Name);
+						typeDef.OtherType = symbolTable.GetType(typeDefNode.OtherType);
+
+
+						CopyLineInfo(typeDef, typeDefNode);
+						symbolTable.SetSymbol(typeDef);
+
+						break;
+					}
+				}
+			}
+
+			// Interface methods
+			foreach (var method in _interfaceMembersToBuild)
+				BuildInterfaceMember(fileId, (Interface)method.symbol, (MemberNode)method.member);
+
+
+			// Members
+			//_verifier.Reset(fileId, symbolTable);
+			foreach (var member in _membersToBuild)
+				BuildMember(fileId, (Class)member.symbol, (MemberNode)member.member);
+
+			// Build serialisation methods
+			foreach (var member in _membersToBuild)
+				BuildSerialisationMethods(fileId, (Class)member.symbol);
+
+			// Check that classes satify their interfaces
+			foreach (var cls in _classes)
+				CheckClassSatisfiesInterfaces(fileId, cls);
+
+			// Add event types
+			foreach (var eventType in Namespace.EventTypes)
+				symbolTable.SetSymbol(eventType, true);
+
+
+			// Verify methods
+			//_verifier.VerifyAll();
+
+			return {namespaces: _namespaces, methods: _methods, properties: _properties};
+		}
+
+
+		void ClearErrors()
+		{
+			_errors = [];
+		}
+
+		void Error(string fileId, string message, Symbol sym)
+		{
+			_errors.Add(new ParserError(fileId, _fileName, message, sym.StartLine, sym.EndLine, sym.StartColumn, sym.EndColumn));
+		}
+
+		void Error(string fileId, string message, Namespace sym)
+		{
+			_errors.Add(new ParserError(fileId, _fileName, message, sym.StartLine, sym.DefinitionEndLine, sym.StartColumn, sym.DefinitionEndColumn));
+		}
+
+		void Error(string fileId, string message, ParseNode node)
+		{
+			_errors.Add(new ParserError(fileId, _fileName, message, node.StartLine, node.EndLine, node.StartColumn, node.EndColumn));
+		}
+
+	private:
+
+		Namespace[] _namespaces;
+		Class[] 	_classes;
+		array 		_membersToBuild;
+		array 		_interfaceMembersToBuild;
+		Method[] 	_methods;
+		Property[] 	_properties;
+
+		void BuildNamespaceSkeleton(string fileId, Namespace ns, NamespaceNode nsNode)
+		{
+			var found = ns.GetSymbolBySignature(nsNode.Name, true);
+
+			Namespace symbol = null;
+
+			if (found && found.Type == SymbolType.Namespace)
+			{
+				var foundNs = (Namespace)found;
+				symbol = foundNs;
+				_namespaces.Add(symbol);
+
+				if (symbol.FileID != fileId)
+				{
+					symbol.SpansMultipleFiles = true;
+				}
+			}
+			else
+			{
+				symbol = new Namespace(nsNode.Name);
+				CopyLineInfo(symbol, nsNode);
+				_namespaces.Add(symbol);
+				ns.SetSymbol(symbol);
+				symbol.FileID = fileId;
+			}
+
+			// Sub symbols
+			foreach (var node in nsNode.Children)
+			{
+				switch (node.Type)
+				{
+					case ASTType.Namespace:
+					{
+						BuildNamespaceSkeleton(fileId, symbol, (NamespaceNode)node);
+						break;
+					}
+
+					case ASTType.Interface:
+					{
+						BuildInterfaceSkeleton(fileId, symbol, (InterfaceNode)node);
+						break;
+					}
+
+					case ASTType.Class:
+					{
+						BuildClassSkeleton(fileId, symbol, (ClassNode)node);
+						break;
+					}
+
+					case ASTType.Enum:
+					{
+						BuildEnum(fileId, symbol, (EnumNode)node);
+						break;
+					}
+
+					case ASTType.Template:
+					{
+						BuildTemplateSkeleton(fileId, (Namespace)symbol, (TemplateNode)node);
+						break;
+					}
+				}
+			}
+
+		}
+
+
+		// Hack
+		bool IsSameSymbol(Symbol sym, ParseNode node)
+		{
+			var lineDiff = sym.StartLine - node.StartLine;
+			//if (lineDiff < 0) lineDiff = -lineDiff;
+			var symHeight = node.EndLine - node.StartLine;
+
+			return lineDiff >= symHeight;
+		}
+
+		void BuildInterfaceSkeleton(string fileId, Namespace ns, InterfaceNode iNode)
+		{
+			var found = ns.GetSymbolBySignature(iNode.Name, true);
+			if (found && found.StartLine == iNode.StartLine)
+			{
+				_namespaces.Add((Namespace)found);
+				return;
+			}
+
+			var symbol = new Interface(iNode.Name);
+			CopyLineInfo(symbol, iNode);
+			_namespaces.Add(symbol);
+			ns.SetSymbol(symbol);
+			symbol.FileID = fileId;
+
+			symbol.Docs = iNode.Docs;
+			symbol.IsDefined = true;
+
+			if (found && found.StartLine != iNode.StartLine)
+			{
+				if (IsSameSymbol(found, iNode))
+					Error(fileId, "Symbol '" + iNode.Name +  "' already exists in scope", symbol);
+			}
+		}
+
+
+		void BuildClassSkeleton(string fileId, Namespace ns, ClassNode cNode)
+		{
+			var found = ns.GetSymbolBySignature(cNode.Name, true);
+			if (found && found.StartLine == cNode.StartLine)
+			{
+				_namespaces.Add((Namespace)found);
+				return;
+			}
+
+			var symbol = new Class(cNode.Name);
+			CopyLineInfo(symbol, cNode);
+			_namespaces.Add(symbol);
+			_classes.Add(symbol);
+			ns.SetSymbol(symbol);
+			symbol.FileID = fileId;
+			symbol.IsNative = cNode.IsNative;
+
+			symbol.Docs = cNode.Docs;
+
+			if (found && (found.StartLine != cNode.StartLine))
+			{
+				if (IsSameSymbol(found, cNode))
+					Error(fileId, "Symbol '" + cNode.Name +  "' already exists in scope", symbol);
+			}
+		}
+
+
+		void BuildTemplateSkeleton(string fileId, Namespace ns, TemplateNode tNode)
+		{
+			var found = ns.GetSymbolBySignature(tNode.Name, true);
+			if (found && found.StartLine == tNode.StartLine)
+			{
+				((Template)found).ClearMembers();
+				_namespaces.Add((Namespace)found);
+				return;
+			}
+
+			var symbol = new Template(tNode.Name);
+			CopyLineInfo(symbol, tNode);
+			_namespaces.Add(symbol);
+			_classes.Add(symbol);
+			ns.SetSymbol(symbol);
+			symbol.FileID = fileId;
+
+			symbol.Docs = tNode.Docs;
+
+			if (found && found.StartLine != tNode.StartLine)
+			{
+				if (IsSameSymbol(found, tNode))
+					Error(fileId, "Symbol '" + tNode.Name +  "' already exists in scope", symbol);
+			}
+		}
+
+		void BuildServerComponentSkeleton(string fileId, Namespace ns, ComponentServerNode cNode)
+		{
+			var found = ns.GetSymbolBySignature(cNode.Name, true);
+			if (found && found.StartLine == cNode.StartLine)
+			{
+				_namespaces.Add((Namespace)found);
+				return;
+			}
+
+			var symbol = new ServerComponent(cNode.Name);
+			CopyLineInfo(symbol, cNode);
+			_namespaces.Add(symbol);
+			_classes.Add(symbol);
+			ns.SetSymbol(symbol);
+			symbol.FileID = fileId;
+			symbol.Docs = cNode.Docs;
+
+			if (found && found.StartLine != cNode.StartLine)
+			{
+				if (IsSameSymbol(found, cNode))
+					Error(fileId, "Symbol '" + cNode.Name +  "' already exists in scope", found);
+			}
+		}
+
+		void BuildClientComponentSkeleton(string fileId, Namespace ns, ComponentClientNode cNode)
+		{
+			var found = ns.GetSymbolBySignature(cNode.Name, true);
+			if (found && found.StartLine == cNode.StartLine)
+			{
+				found.PackageID = Namespace.CurrentPackageID;
+				_namespaces.Add((Namespace)found);
+				return;
+			}
+
+			var symbol = new ClientComponent(cNode.Name);
+			CopyLineInfo(symbol, cNode);
+			_namespaces.Add(symbol);
+			_classes.Add(symbol);
+			ns.SetSymbol(symbol);
+			symbol.PackageID = Namespace.CurrentPackageID;
+			symbol.FileID = fileId;
+			symbol.Docs = cNode.Docs;
+
+			if (found && found.StartLine != cNode.StartLine)
+			{
+				if (IsSameSymbol(found, cNode))
+					Error(fileId, "Symbol '" + cNode.Name +  "' already exists in scope", found);
+			}
+		}
+
+		void BuildInitialiserSkeleton(string fileId, Namespace ns, InitialiserNode iNode)
+		{
+			var found = ns.GetSymbolBySignature(iNode.Name, true);
+			if (found && found.StartLine == iNode.StartLine)
+			{
+				_namespaces.Add((Namespace)found);
+				return;
+			}
+
+			var symbol = new Initialiser(iNode.Name);
+			CopyLineInfo(symbol, iNode);
+			_namespaces.Add(symbol);
+			_classes.Add(symbol);
+			ns.SetSymbol(symbol);
+			symbol.FileID = fileId;
+			symbol.Docs = iNode.Docs;
+
+			if (found && found.StartLine != iNode.StartLine)
+			{
+				if (IsSameSymbol(found, iNode))
+					Error(fileId, "Symbol '" + iNode.Name +  "' already exists in scope", found);
+			}
+		}
+
+
+		void BuildServiceSkeleton(string fileId, Namespace ns, ServiceNode iNode)
+		{
+			var found = ns.GetSymbolBySignature(iNode.Name, true);
+			if (found && found.StartLine == iNode.StartLine)
+			{
+				_namespaces.Add((Namespace)found);
+				return;
+			}
+
+			var symbol = new Service(iNode.Name);
+			CopyLineInfo(symbol, iNode);
+			_namespaces.Add(symbol);
+			_classes.Add(symbol);
+			ns.SetSymbol(symbol);
+			symbol.FileID = fileId;
+			symbol.Docs = iNode.Docs;
+
+			if (found && found.StartLine != iNode.StartLine)
+			{
+				if (IsSameSymbol(found, iNode))
+					Error(fileId, "Symbol '" + iNode.Name +  "' already exists in scope", found);
+			}
+		}
+
+		void BuildEnum(string fileId, Namespace ns, EnumNode eNode)
+		{
+			var found = ns.GetSymbolBySignature(eNode.Name, true);
+			if (found && found.StartLine != eNode.StartLine)
+			{
+				_namespaces.Add((Enum)found);
+				return;
+			}
+
+			var symbol = new Enum(eNode.Name);
+			CopyLineInfo(symbol, eNode);
+			_namespaces.Add(symbol);
+			ns.SetSymbol(symbol);
+			symbol.FileID = fileId;
+			symbol.Docs = eNode.Docs;
+
+			foreach (var key in eNode.KVPairs.Keys())
+				symbol.KVPairs[key] = eNode.KVPairs[key];
+		}
+
+
+		void BuildNamespace(string fileId, Namespace parent, NamespaceNode node)
+		{
+			var symbol = (Namespace)parent.GetSymbolBySignature(node.Name, true);
+
+			foreach (var used in node.UsedNamespaces)
+			{
+				var found = symbol.GetNamespaceFromTypeNode(used);
+				if (found)
+				{
+					if (found.Type == SymbolType.Namespace || found.Type == SymbolType.SymbolTable)
+						symbol.UseNamespace(found);
+					else
+						Error(fileId, "Cannot use '" + found.Name + "' as it is not a namespace", found);
+				}
+				else
+					Error(fileId, "Cannot find namespace '" + used.Name + "'", used);
+			}
+
+			foreach (var child in node.Children)
+			{
+				switch (child.Type)
+				{
+					case ASTType.Namespace:
+					{
+						BuildNamespace(fileId, symbol, (NamespaceNode)child);
+						break;
+					}
+
+					case ASTType.Interface:
+					{
+						BuildInterface(fileId, symbol, (InterfaceNode)child);
+						break;
+					}
+
+					case ASTType.Class:
+					{
+						BuildClass(fileId, symbol, (ClassNode)child);
+						break;
+					}
+
+					case ASTType.Template:
+					{
+						BuildTemplate(fileId, symbol, (TemplateNode)child);
+						break;
+					}
+
+					case ASTType.Typedef:
+					{
+						var typeDefNode = (TypedefNode)node;
+						var typeDef = new TypeDef(typeDefNode.Name);
+						typeDef.OtherType = symbol.GetType(typeDefNode.OtherType);
+
+
+						CopyLineInfo(typeDef, typeDefNode);
+						symbol.SetSymbol(typeDef);
+
+						break;
+					}
+				}
+			}
+		}
+
+
+		void BuildInterface(string fileId, Namespace parent, InterfaceNode node)
+		{
+			var symbol = (Interface)parent.GetSymbolBySignature(node.Name, true);
+
+			// Prepare to build members
+			symbol.ClearMembers();
+			foreach (var member in node.Members)
+				_interfaceMembersToBuild.Add({symbol: symbol, member: member});
+		}
+
+
+		void BuildTemplate(string fileId, Namespace parent, TemplateNode node)
+		{
+			var symbol = (Template)parent.GetSymbolBySignature(node.Name, true);
+			_classes.Add(symbol);
+
+			_membersToBuild.Add({symbol: symbol, member: node.MainMethod});
+
+
+			foreach (var param in node.Parameters)
+			{
+				var defaultValue = param.defaultValue ? ( ((LitExpressionNode)param.defaultValue).Literal.Value ) : null;
+				symbol.AddParameter(parent.GetType((TypeNode)param.type), (string)param.name, defaultValue);
+			}
+		}
+
+
+		void BuildServerComponent(string fileId, Namespace parent, ComponentServerNode node)
+		{
+			var symbol = (ServerComponent)parent.GetSymbolBySignature(node.Name, true);
+			_classes.Add(symbol);
+
+
+			// Used namespaces
+			foreach (var used in node.ComponentUsings)
+			{
+				var found = parent.GetNamespaceFromTypeNode(used);
+				if (found)
+				{
+					if (found.Type == SymbolType.Namespace || found.Type == SymbolType.SymbolTable)
+						symbol.UseNamespace(found);
+					else
+						Error(fileId, "Cannot use '" + found.Name + "' as it is not a namespace", found);
+				}
+				else
+					Error(fileId, "Cannot find namespace '" + used.Name + "'", used);
+			}
+
+
+			// Check for base class
+			if (node.BaseClass)
+			{
+				var foundBase = symbol.GetInterfaceFromTypeNode(node.BaseClass);
+				if (foundBase)
+				{
+					if (foundBase.Type == SymbolType.Class)
+						symbol.BaseClass = (Class)foundBase;
+					else
+						Error(fileId, "Class '" + symbol.Name + "' cannot extend '" + foundBase.Name + "' as it is not a class", symbol);
+				}
+				else
+					Error(fileId, "Cant find base class '" + node.BaseClass.Name + "'", node.BaseClass);
+			}
+
+
+			// Check if we have an empty constructor
+			bool hasEmptyConstructor = false;
+			foreach (var member in node.Members)
+			{
+				if (member.IsConstructor())
+				{
+					var constr = (ConstructorNode)member;
+
+					if (constr.Params.Length() == 0)
+						hasEmptyConstructor = true;
+				}
+			}
+
+			// If no empty constructor, create a fake one
+			// This is necessary for compilation to call base constructor. See TranslateConstructor() for details
+			if (!hasEmptyConstructor)
+			{
+				var fake = new ConstructorNode();
+				fake.Block = new BlockNode();
+
+				_membersToBuild.Add({
+					symbol: symbol,
+					member: fake
+				});
+			}
+
+
+			// Prepare to build members
+			symbol.ClearMembers();
+			foreach (var member in node.Members)
+				_membersToBuild.Add({symbol: symbol, member: member});
+
+			// Check interfaces
+			var interfaces = node.Interfaces;
+			foreach (var i in interfaces)
+			{
+				var found = symbol.GetInterfaceFromTypeNode(i);
+				if (found)
+				{
+					if (found.Type == SymbolType.Interface)
+						symbol.AddInterface(found);
+					else
+						Error(fileId, "Class '" + symbol.Name +  "' cannot implement '" + found.Name +  "' as it is not an interface", i);
+				}
+				else
+					Error(fileId, "Cant find interface '" + i.Name + "'", i);
+			}
+
+		}
+
+		void BuildClientComponent(string fileId, Namespace parent, ComponentClientNode node)
+		{
+			var symbol = (ClientComponent)parent.GetSymbolBySignature(node.Name, true);
+			_classes.Add(symbol);
+
+
+			// Used namespaces
+			foreach (var used in node.ComponentUsings)
+			{
+				var found = parent.GetNamespaceFromTypeNode(used);
+				if (found)
+				{
+					if (found.Type == SymbolType.Namespace || found.Type == SymbolType.SymbolTable)
+						symbol.UseNamespace(found);
+					else
+						Error(fileId, "Cannot use '" + found.Name + "' as it is not a namespace", found);
+				}
+				else
+					Error(fileId, "Cannot find namespace '" + used.Name + "'", used);
+			}
+
+			// Check for base class
+			if (node.BaseClass)
+			{
+				var foundBase = symbol.GetInterfaceFromTypeNode(node.BaseClass);
+				if (foundBase)
+				{
+					if (foundBase.Type == SymbolType.Class)
+						symbol.BaseClass = (Class)foundBase;
+					else
+						Error(fileId, "Class '" + symbol.Name + "' cannot extend '" + foundBase.Name + "' as it is not a class", symbol);
+				}
+				else
+					Error(fileId, "Cant find base class '" + node.BaseClass.Name + "'", node.BaseClass);
+			}
+
+			// Check if we have an empty constructor
+			bool hasEmptyConstructor = false;
+			foreach (var member in node.Members)
+			{
+				if (member.IsConstructor())
+				{
+					var constr = (ConstructorNode)member;
+
+					if (constr.Params.Length() == 0)
+						hasEmptyConstructor = true;
+				}
+			}
+
+			// If no empty constructor, create a fake one
+			// This is necessary for compilation to call base constructor. See TranslateConstructor() for details
+			if (!hasEmptyConstructor)
+			{
+				var fake = new ConstructorNode();
+				fake.Block = new BlockNode();
+
+				_membersToBuild.Add({
+					symbol: symbol,
+					member: fake
+				});
+			}
+
+
+			// Prepare to build members
+			symbol.ClearMembers();
+			foreach (var member in node.Members)
+				_membersToBuild.Add({symbol: symbol, member: member});
+
+
+			var parser = new Parser();
+
+			// Add GetElem()
+			var getElem = new Method(Interface.ObjectType, "GetElem");
+			symbol.AddMember(getElem);
+			parser.SetContent("{ return :this.__elem__; }");
+			getElem.Block = parser.ParseBlock();
+
+			// Add GetChild(string name)
+			var getChild = new Method(Interface.ObjectType, "GetChild");
+			getChild.AddParameter(Interface.StringType, "name");
+			symbol.AddMember(getChild);
+			parser.SetContent("{ return :this.__elem__.querySelector('[data-name=\"' + name + '\"]'); }");
+			getChild.Block = parser.ParseBlock();
+
+			// Check interfaces
+			var interfaces = node.Interfaces;
+			foreach (var i in interfaces)
+			{
+				var found = symbol.GetInterfaceFromTypeNode(i);
+				if (found)
+				{
+					if (found.Type == SymbolType.Interface)
+						symbol.AddInterface(found);
+					else
+						Error(fileId, "Class '" + symbol.Name +  "' cannot implement '" + found.Name +  "' as it is not an interface", i);
+				}
+				else
+					Error(fileId, "Cant find interface '" + i.Name + "'", i);
+			}
+		}
+
+		void BuildInitialiser(string fileId, Namespace parent, InitialiserNode node)
+		{
+			var symbol = (Initialiser)parent.GetSymbolBySignature(node.Name, true);
+			_classes.Add(symbol);
+
+
+			// Used namespaces
+			foreach (var used in node.InitUsings)
+			{
+				var found = parent.GetNamespaceFromTypeNode(used);
+				if (found)
+				{
+					if (found.Type == SymbolType.Namespace || found.Type == SymbolType.SymbolTable)
+						symbol.UseNamespace(found);
+					else
+						Error(fileId, "Cannot use '" + found.Name + "' as it is not a namespace", found);
+				}
+				else
+					Error(fileId, "Cannot find namespace '" + used.Name + "'", used);
+			}
+
+
+			// Check for base class
+			if (node.BaseClass)
+			{
+				var foundBase = symbol.GetInterfaceFromTypeNode(node.BaseClass);
+				if (foundBase)
+				{
+					if (foundBase.Type == SymbolType.Class)
+						symbol.BaseClass = (Class)foundBase;
+					else
+						Error(fileId, "Class '" + symbol.Name + "' cannot extend '" + foundBase.Name + "' as it is not a class", symbol);
+				}
+				else
+					Error(fileId, "Cant find base class '" + node.BaseClass.Name + "'", node.BaseClass);
+			}
+
+
+			// Check if we have an empty constructor
+			bool hasEmptyConstructor = false;
+			foreach (var member in node.Members)
+			{
+				if (member.IsConstructor())
+				{
+					var constr = (ConstructorNode)member;
+
+					if (constr.Params.Length() == 0)
+						hasEmptyConstructor = true;
+				}
+			}
+
+			// If no empty constructor, create a fake one
+			// This is necessary for compilation to call base constructor. See TranslateConstructor() for details
+			if (!hasEmptyConstructor)
+			{
+				var fake = new ConstructorNode();
+				fake.Block = new BlockNode();
+
+				_membersToBuild.Add({
+					symbol: symbol,
+					member: fake
+				});
+			}
+
+
+			// Prepare to build members
+			symbol.ClearMembers();
+			foreach (var member in node.Members)
+				_membersToBuild.Add({symbol: symbol, member: member});
+
+			// Check interfaces
+			var interfaces = node.Interfaces;
+			foreach (var i in interfaces)
+			{
+				var found = symbol.GetInterfaceFromTypeNode(i);
+				if (found)
+				{
+					if (found.Type == SymbolType.Interface)
+						symbol.AddInterface(found);
+					else
+						Error(fileId, "Class '" + symbol.Name +  "' cannot implement '" + found.Name +  "' as it is not an interface", i);
+				}
+				else
+					Error(fileId, "Cant find interface '" + i.Name + "'", i);
+			}
+
+		}
+
+
+		void BuildService(string fileId, Namespace parent, ServiceNode node)
+		{
+			var symbol = (Service)parent.GetSymbolBySignature(node.Name, true);
+			_classes.Add(symbol);
+
+
+			// Used namespaces
+			foreach (var used in node.ServiceUsings)
+			{
+				var found = parent.GetNamespaceFromTypeNode(used);
+				if (found)
+				{
+					if (found.Type == SymbolType.Namespace || found.Type == SymbolType.SymbolTable)
+						symbol.UseNamespace(found);
+					else
+						Error(fileId, "Cannot use '" + found.Name + "' as it is not a namespace", found);
+				}
+				else
+					Error(fileId, "Cannot find namespace '" + used.Name + "'", used);
+			}
+
+
+			// Check for base class
+			if (node.BaseClass)
+			{
+				var foundBase = symbol.GetInterfaceFromTypeNode(node.BaseClass);
+				if (foundBase)
+				{
+					if (foundBase.Type == SymbolType.Class)
+						symbol.BaseClass = (Class)foundBase;
+					else
+						Error(fileId, "Class '" + symbol.Name + "' cannot extend '" + foundBase.Name + "' as it is not a class", symbol);
+				}
+				else
+					Error(fileId, "Cant find base class '" + node.BaseClass.Name + "'", node.BaseClass);
+			}
+
+
+			// Check if we have an empty constructor
+			bool hasEmptyConstructor = false;
+			foreach (var member in node.Members)
+			{
+				if (member.IsConstructor())
+				{
+					var constr = (ConstructorNode)member;
+
+					if (constr.Params.Length() == 0)
+						hasEmptyConstructor = true;
+				}
+			}
+
+			// If no empty constructor, create a fake one
+			// This is necessary for compilation to call base constructor. See TranslateConstructor() for details
+			if (!hasEmptyConstructor)
+			{
+				var fake = new ConstructorNode();
+				fake.Block = new BlockNode();
+
+				_membersToBuild.Add({
+					symbol: symbol,
+					member: fake
+				});
+			}
+
+
+			// Prepare to build members
+			symbol.ClearMembers();
+			foreach (var member in node.Members)
+				_membersToBuild.Add({symbol: symbol, member: member});
+
+			// Check interfaces
+			var interfaces = node.Interfaces;
+			foreach (var i in interfaces)
+			{
+				var found = symbol.GetInterfaceFromTypeNode(i);
+				if (found)
+				{
+					if (found.Type == SymbolType.Interface)
+						symbol.AddInterface(found);
+					else
+						Error(fileId, "Class '" + symbol.Name +  "' cannot implement '" + found.Name +  "' as it is not an interface", i);
+				}
+				else
+					Error(fileId, "Cant find interface '" + i.Name + "'", i);
+			}
+
+		}
+
+		void BuildClass(string fileId, Namespace parent, ClassNode node)
+		{
+
+			var symbol = (Class)parent.GetSymbolBySignature(node.Name, true);
+			_classes.Add(symbol);
+
+			// Check for base class
+			if (node.BaseClass)
+			{
+				var foundBase = symbol.GetInterfaceFromTypeNode(node.BaseClass);
+				if (foundBase)
+				{
+					if (foundBase.Type == SymbolType.Class)
+						symbol.BaseClass = (Class)foundBase;
+					else
+						Error(fileId, "Class '" + symbol.Name + "' cannot extend '" + foundBase.Name + "' as it is not a class", symbol);
+				}
+				else
+					Error(fileId, "Cant find base class '" + node.BaseClass.Name + "'", node.BaseClass);
+			}
+
+			symbol.ClearMembers();
+
+			// Check if we have an empty constructor
+			// and collect methods too
+			bool hasEmptyConstructor = false;
+			foreach (var member in node.Members)
+			{
+				if (member.IsConstructor())
+				{
+					var constr = (ConstructorNode)member;
+
+					if (constr.Params.Length() == 0)
+						hasEmptyConstructor = true;
+				}
+			}
+
+			// If no empty constructor, create a fake one
+			// This is necessary for compilation to call base constructor. See TranslateConstructor() for details
+			if (!hasEmptyConstructor)
+			{
+				var fake = new ConstructorNode();
+				fake.Block = new BlockNode();
+
+				_membersToBuild.Add({
+					symbol: symbol,
+					member: fake
+				});
+			}
+
+			// Prepare to build members
+			foreach (var member in node.Members)
+				_membersToBuild.Add({symbol: symbol, member: member});
+
+			// Check interfaces
+			var interfaces = node.Interfaces;
+			foreach (var i in interfaces)
+			{
+				var found = symbol.GetInterfaceFromTypeNode(i);
+				if (found)
+				{
+					if (found.Type == SymbolType.Interface)
+						symbol.AddInterface(found);
+					else
+						Error(fileId, "Class '" + symbol.Name +  "' cannot implement '" + found.Name +  "' as it is not an interface", i);
+				}
+				else
+					Error(fileId, "Cant find interface '" + i.Name + "'", i);
+			}
+
+		}
+
+
+		/** Build serialisation methods */
+		void BuildSerialisationMethods(string fileId, Class cls)
+		{
+			/*if (!cls.HasSerialisationMethods)
+			{
+				cls.HasSerialisationMethods = true;
+
+				Field[] fields = [];
+				var members = cls.GetAllMembers();
+				foreach (var member in members)
+				{
+					if (member.IsField())
+						fields.Add((Field)member);
+				}
+
+
+				if (fields.Length() > 0)
+				{
+					bool error = false;
+					var deserialiseCode = "{ var inst = new " + cls.Name + "(); ";
+
+					foreach (var field in fields)
+					{
+						deserialiseCode += "inst." + field.Name + " = ";
+
+						if (field && field.Type)
+						{
+							if (field.Type.IsBasic() || field.Type.IsArray() || field.Type.IsMap()) // || field.Type.IsFunction() || field.Type.IsEvent())
+							{
+								deserialiseCode += "(" + field.Type.Name + ")obj[\"" + field.Name + "\"]; ";
+							}
+							else if (!field.Type.IsFunction() && !field.Type.IsEvent())
+							{
+								deserialiseCode += field.Type.FullName + ".__deserialise(obj[\"" + field.Name + "\"]); ";
+							}
+						}
+						else
+							error = true;
+					}
+
+					if (!error)
+					{
+						deserialiseCode += "return inst;";
+
+						deserialiseCode += " }";
+						var deserialise = Method.Create(cls, "__deserialise", [{type: Interface.ObjectType, name: "obj"}], {block: deserialiseCode});
+						deserialise.Static = true;
+						cls.AddMember(deserialise);
+					}
+				}
+
+			}*/
+			
+		}
+
+
+		/** Build interface member */
+		void BuildInterfaceMember(string fileId, Interface intr, MemberNode node)
+		{
+			var type = intr.GetType(node.Type, function(TypeNode errorNode) {
+				Error(fileId, "Unknown type '" + errorNode.Name + "'", errorNode);
+			});
+
+			/*Method method = new Method(type, node.Name);
+			CopyLineInfo(method, node);
+
+			var methodNode = (MethodNode)node;
+			foreach (var paramNode in methodNode.Params)
+			{
+				var pType = intr.GetType((TypeNode)paramNode.type, function(TypeNode errorNode) {
+						Error(fileId, "Unknown type '" + errorNode.Name + "'", errorNode);
+					});
+					
+
+				method.AddParameter(pType, (string)paramNode.name);
+			}
+
+			if (!intr.AddMember(method))
+				Error(fileId, "'" + method.Signature() + "' already exists in interface '" + intr.Name + "'", node);*/
+
+			if (node.IsMethod())
+			{
+				Method method = new Method(type, node.Name);
+				CopyLineInfo(method, node);
+
+				var methodNode = (MethodNode)node;
+				foreach (var paramNode in methodNode.Params)
+				{
+					var pType = intr.GetType((TypeNode)paramNode.type, function(TypeNode errorNode) {
+							Error(fileId, "Unknown type '" + errorNode.Name + "'", errorNode);
+						});
+						
+
+					method.AddParameter(pType, (string)paramNode.name);
+				}
+
+				if (!intr.AddMember(method))
+					Error(fileId, "'" + method.Signature() + "' already exists in interface '" + intr.Name + "'", node);
+			}
+			else if (node.IsField())
+			{
+				Field field = new Field(type, node.Name);
+				CopyLineInfo(field, node);
+
+				if (!intr.AddMember(field))
+					Error(fileId, "'" + field.Signature() + "' already exists in interface '" + intr.Name + "'", node);
+			}
+		}
+
+
+
+		/** Build class member */
+		void BuildMember(string fileId, Class cls, MemberNode node)
+		{
+
+			// Field
+			if (node.IsField())
+			{
+				var type = cls.GetType(node.Type, function(TypeNode errorNode) {
+					Error(fileId, "Unknown type '" + errorNode.Name + "'", errorNode);
+				});
+
+
+				Field field = new Field(type, node.Name);
+				CopyLineInfo(field, node);
+
+				field.Default = ((FieldNode)node).Default;
+
+				if (!cls.AddMember(field))
+					Error(fileId, "'" + node.Name + "' already exists in class '" + cls.Name + "'", node);
+
+				field.Static = node.Static;
+				field.Access = node.Access;
+				field.Docs = node.Docs;
+			}
+
+			// Method
+			else if (node.IsMethod())
+			{
+
+				// Handle constructors separately
+				if (node.IsConstructor())
+				{
+					var constr = new Constructor();
+					CopyLineInfo(constr, node);
+					_methods.Add(constr);
+
+					var constrNode = (ConstructorNode)node;
+					foreach (var paramNode in constrNode.Params)
+					{
+						var pType = cls.GetType((TypeNode)paramNode.type, function(TypeNode errorNode) {
+								Error(fileId, "Unknown type '" + errorNode.Name + "'", errorNode);
+							});
+							
+
+						var defaultValue = paramNode.defaultValue ? ( ((LitExpressionNode)paramNode.defaultValue).Literal.Value ) : null;
+						if (!constr.AddParameter(pType, (string)paramNode.name, defaultValue))
+							Error(fileId, "Parameter '" + (string)paramNode.name + "' already exists", node);
+					}
+
+					constr.Access = constrNode.Access;
+					constr.Static = false;
+					constr.Virtual = false;
+					constr.Docs = node.Docs;
+
+					if (!cls.AddMember(constr))
+						Error(fileId, "Constructor '" + constr.Signature() + "' already exists in class '" + cls.Name + "'", node);
+
+					constr.Block = constrNode.Block;
+					constr.BaseCall = constrNode.BaseCall;
+
+					constr.CopyUsingsFromSymbolTable(_currentSymbolTable);
+
+					_verifier.AddItem(_fileId, _fileName, constr, _currentSymbolTable);
+				}
+
+				// Server component Render()
+				else if (node.IsServerRender())
+				{
+					ServerRender method = new ServerRender();
+					CopyLineInfo(method, node);
+					_methods.Add(method);
+
+					var methodNode = (MethodNode)node;
+					foreach (var paramNode in methodNode.Params)
+					{
+						var pType = cls.GetType((TypeNode)paramNode.type, function(TypeNode errorNode) {
+								Error(fileId, "Unknown type '" + errorNode.Name + "'", errorNode);
+							});
+							
+						var defaultValue = paramNode.defaultValue ? ( ((LitExpressionNode)paramNode.defaultValue).Literal.Value ) : null;
+						if (!method.AddParameter(pType, (string)paramNode.name, defaultValue))
+							Error(fileId, "Parameter '" + (string)paramNode.name + "' already exists", node);
+					}
+
+					method.Access = MemberAccess.Public;
+					method.Static = false;
+					method.Virtual = false;
+					method.Docs = node.Docs;
+
+					if (!cls.AddMember(method))
+						Error(fileId, "'" + method.Signature() + "' already exists in class '" + cls.Name + "'", node);
+
+					((ServerComponent)cls).RenderMethod = method;
+
+					method.Block = methodNode.Block;
+
+					method.CopyUsingsFromSymbolTable(_currentSymbolTable);
+
+					_verifier.AddItem(_fileId, _fileName, method, _currentSymbolTable);
+				}
+
+				// Template method
+				else if (node.IsTemplateMethod())
+				{
+					var method = new TemplateRender(node.Name, (Template)cls);
+					CopyLineInfo(method, node);
+					_methods.Add(method);
+
+					var methodNode = (MethodNode)node;
+					foreach (var paramNode in methodNode.Params)
+					{
+						var pType = cls.GetType((TypeNode)paramNode.type, function(TypeNode errorNode) {
+								Error(fileId, "Unknown type '" + errorNode.Name + "'", errorNode);
+							});
+							
+						var defaultValue = paramNode.defaultValue ? ( ((LitExpressionNode)paramNode.defaultValue).Literal.Value ) : null;
+						if (!method.AddParameter(pType, (string)paramNode.name, defaultValue))
+							Error(fileId, "Parameter '" + (string)paramNode.name + "' already exists", node);
+					}
+
+					method.Access = MemberAccess.Public;
+					method.Static = false;
+					method.Virtual = false;
+					method.Docs = node.Docs;
+
+					if (!cls.AddMember(method))
+						Error(fileId, "'" + method.Signature() + "' already exists in class '" + cls.Name + "'", node);
+
+					method.Block = methodNode.Block;
+
+					method.CopyUsingsFromSymbolTable(_currentSymbolTable);
+
+					_verifier.AddItem(_fileId, _fileName, method, _currentSymbolTable);
+				}
+
+				// Regular method
+				else
+				{
+					var type = cls.GetType(node.Type, function(TypeNode errorNode) {
+						Error(fileId, "Unknown type '" + errorNode.Name + "'", errorNode);
+					});
+
+					Method method = new Method(type, node.Name);
+
+					CopyLineInfo(method, node);
+					_methods.Add(method);
+
+					var methodNode = (MethodNode)node;
+					foreach (var paramNode in methodNode.Params)
+					{
+						var pType = cls.GetType((TypeNode)paramNode.type, function(TypeNode errorNode) {
+								Error(fileId, "Unknown type '" + errorNode.Name + "'", errorNode);
+							});
+							
+
+						var defaultValue = paramNode.defaultValue ? ( ((LitExpressionNode)paramNode.defaultValue).Literal.Value ) : null;
+						if (!method.AddParameter(pType, (string)paramNode.name, defaultValue))
+							Error(fileId, "Parameter '" + (string)paramNode.name + "' already exists", node);
+					}
+
+					method.Static = methodNode.Static;
+					method.Access = methodNode.Access;
+					method.Virtual = methodNode.Virtual;
+					method.Docs = node.Docs;
+					method.Aliased = methodNode.Aliased;
+
+					if (!cls.AddMember(method))
+						Error(fileId, "'" + method.Signature() + "' already exists in class '" + cls.Name + "'", node);
+
+
+					method.Block = methodNode.Block;
+					method.CopyUsingsFromSymbolTable(_currentSymbolTable);
+
+
+					_verifier.AddItem(_fileId, _fileName, method, _currentSymbolTable);
+				}
+			}
+
+
+			// Property
+			else if (node.IsProperty())
+			{
+				var type = cls.GetType(node.Type, function(TypeNode errorNode) {
+					Error(fileId, "Unknown type '" + errorNode.Name + "'", errorNode);
+				});
+
+
+				Property property = new Property(type, node.Name);
+				CopyLineInfo(property, node);
+				_properties.Add(property);
+
+				if (!cls.AddMember(property))
+					Error(fileId, "'" + node.Name + "' already exists in class '" + cls.Name + "'", node);
+
+				property.Static = node.Static;
+				property.Access = node.Access;
+				property.Docs = node.Docs;
+
+				var propNode = (PropertyNode)node;
+				if (propNode.Getter)
+				{
+					Method getterMethod = new Method(type, "get" + propNode.Name);
+					getterMethod.IsPropertyMethod = true;
+					getterMethod.Static = node.Static;
+					getterMethod.Access = node.Access;
+					_methods.Add(getterMethod);
+					cls.AddMember(getterMethod);
+					property.Getter = getterMethod;
+
+					getterMethod.Block = (BlockNode)propNode.Getter;
+					getterMethod.PropertyMethodIsBlock = propNode.GetterIsBlock;
+
+					_verifier.AddItem(_fileId, _fileName, getterMethod, _currentSymbolTable);
+				}
+				if (propNode.Setter)
+				{
+					Method setterMethod = new Method(type, "set" + propNode.Name);
+					setterMethod.AddParameter(type, "value");
+					setterMethod.IsPropertyMethod = true;
+					setterMethod.Static = node.Static;
+					setterMethod.Access = node.Access;
+					_methods.Add(setterMethod);
+					cls.AddMember(setterMethod);
+					property.Setter = setterMethod;
+
+					setterMethod.Block = (BlockNode)propNode.Setter;
+					setterMethod.PropertyMethodIsBlock = propNode.SetterIsBlock;
+
+					_verifier.AddItem(_fileId, _fileName, setterMethod, _currentSymbolTable);
+				}
+			}
+		}
+
+
+		/** Check class satisfies its interfaces */
+		void CheckClassSatisfiesInterfaces(string fileId, Class cls)
+		{
+			var interfaces = cls.Interfaces;
+
+			foreach (var intr in interfaces)
+			{
+				var members = intr.GetAllMembers();
+
+				Member[] missing = [];
+				foreach (var member in members)
+				{
+					var signature = member.Signature();
+					var found = cls.GetMemberFromTop(signature);
+
+					if (found)
+					{
+						found.Implementing = member;
+
+						if (found.Type != member.Type)
+							Error(fileId, "Member type should be '" + member.Type.Name + "' to fit interface '" + intr.Name + "'", found);
+
+						if (found.IsMethod())
+						{
+							// Check that there are no other methods with this name
+							var otherMethods = cls.GetMembersByName(member.Name);
+							foreach (var otherMethod in otherMethods)
+							{
+								if (otherMethod != found && !((Method)otherMethod).DoesOverride((Method)found))
+								{
+									Error(fileId, "Cannot overload method '" + found.Signature() + "' as it creates a conflict in interface '${intr.Name}'", otherMethod);
+								}
+							}
+						}
+					}
+					else
+						missing.Add(member);
+				}
+
+				if (missing.Length() > 0)
+				{
+					var missingNames = missing[0].Signature();
+
+					for (int m = 1; m < missing.Length(); m++)
+						missingNames += ", " + missing[m].Signature();
+
+					Error(fileId, "Class '${cls.Name}' does not fully implement '${intr.Name}'. Missing: ${missingNames}", cls);
+				}
+			}
+		}
+
+
+		void CopyLineInfo(Symbol nto, ParseNode from)
+		{
+			nto.StartLine = from.StartLine;
+			nto.EndLine = from.EndLine;
+			nto.StartColumn = from.StartColumn;
+			nto.EndColumn = from.EndColumn;
+		}
+
+		void CopyLineInfo(Namespace nto, NamespaceNode from)
+		{
+			nto.StartLine = from.StartLine;
+			nto.EndLine = from.EndLine;
+			nto.StartColumn = from.StartColumn;
+			nto.EndColumn = from.EndColumn;
+			nto.DefinitionEndLine = from.DefinitionEndLine;
+			nto.DefinitionEndColumn = from.DefinitionEndColumn;
+		}
+	}
+
+
+}

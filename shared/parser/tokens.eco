@@ -1,0 +1,410 @@
+using std;
+
+
+namespace eco
+{
+	enum TokenType
+	{
+		None,
+        
+        DocComment,
+        
+		Ident,
+		Bool,
+		Char,
+		Int,
+		Float,
+		String,
+        AsmStr,
+        
+		Operator,
+        
+		BraceOpen,
+		BraceClose,
+		ParOpen,
+		ParClose,
+		SquareOpen,
+		SquareClose,
+		Comma,
+		Dot,
+        Arrow,
+		Colon,
+		Semicolon,
+		Amp,
+        At,
+        MClose,
+        MSelfClose,
+        Dollar,
+        
+		KW_Start,
+        
+        K_Target,
+        K_Targets,
+        K_Excludes,
+		K_Import,
+		K_Using,
+		K_Typedef,
+		K_Package,
+        K_Template,
+        K_Native,
+		K_Class,
+		K_Interface,
+		K_Enum,
+		K_Public,
+		K_Protected,
+		K_Private,
+		K_Static,
+        K_Virtual,
+		K_Get,
+		K_Set,
+        K_Alias,
+        K_Ajax,
+        K_Router,
+        K_Routes,
+		K_As,
+        
+		K_Var,
+		K_Return,
+
+		K_True,
+		K_False,
+		K_Null,
+		K_This,
+		K_Self,
+		K_Base,
+		K_New,
+		K_If,
+		K_Else,
+		K_For,
+		K_Foreach,
+		K_In,
+		K_While,
+		K_Switch,
+        K_Case,
+        K_Default,
+		K_Break,
+		K_Continue,
+        K_Try,
+        K_Catch,
+        K_Throw,
+        K_Print,
+        K_Await,
+        
+		KW_End
+	}
+
+
+    // Operator token type
+	enum OpType
+	{
+		Mult,
+		Div,
+		Exp,
+		Add,
+		Sub,
+		Mod,
+        
+		CmpGT,
+		CmpLT,
+		CmpGTE,
+		CmpLTE,
+		CmpEq,
+		CmpNEq,
+        
+		And,
+		Or,
+		Not,
+        
+        Cond,
+        
+		Inc,
+		Dec,
+        
+		Assign,
+		AAdd,
+		ASub,
+		AMul,
+		ADiv,
+		AExp,
+		AMod,
+        
+		Connect
+	}
+    
+
+	class Token
+	{
+		/** Construct */
+		new(TokenType type, object val = null)
+		{
+			_tokType = type;
+			_value = val;
+		}
+
+		/** Token type */
+		TokenType Type : private _tokType = TokenType.None { get return _tokType; }
+
+		/** Token value */
+		object Value : private _value = null { get return _value; }
+
+
+		/** Positions */
+		int Line;
+		int Column;
+		int Position;
+
+
+
+		/** Get keyword */
+		static TokenType GetKeyword(string kw)
+		{
+			if (!_keywords)
+			{
+				_keywords = {
+					"__target": 	TokenType.K_Target,
+					"__targets": 	TokenType.K_Targets,
+					"__excludes": 	TokenType.K_Excludes,
+					"import": 		TokenType.K_Import,
+					"using": 		TokenType.K_Using,
+					"typedef":		TokenType.K_Typedef,
+					"namespace": 	TokenType.K_Package,
+					"template": 	TokenType.K_Template,
+					"native":		TokenType.K_Native,
+					"class": 		TokenType.K_Class,
+					"interface": 	TokenType.K_Interface,
+					"enum": 		TokenType.K_Enum,
+					"public": 		TokenType.K_Public,
+					"protected": 	TokenType.K_Protected,
+					"private": 		TokenType.K_Private,
+					"static": 		TokenType.K_Static,
+					"virtual": 		TokenType.K_Virtual,
+					"get": 			TokenType.K_Get,
+					"set": 			TokenType.K_Set,
+					"alias": 		TokenType.K_Alias,
+					"__ajax": 		TokenType.K_Ajax,
+					"__router": 	TokenType.K_Router,
+					"__routes": 	TokenType.K_Routes,
+					"as":			TokenType.K_As,
+					
+					"var": 			TokenType.K_Var,
+					"return": 		TokenType.K_Return,
+					
+					"true": 		TokenType.K_True,
+					"false": 		TokenType.K_False,
+					"null": 		TokenType.K_Null,
+					"this": 		TokenType.K_This,
+					"self":			TokenType.K_Self,
+					"base": 		TokenType.K_Base,
+					"new": 			TokenType.K_New,
+					"if": 			TokenType.K_If,
+					"else": 		TokenType.K_Else,
+					"for": 			TokenType.K_For,
+					"foreach": 		TokenType.K_Foreach,
+					"in": 			TokenType.K_In,
+					"while": 		TokenType.K_While,
+					"switch": 		TokenType.K_Switch,
+					"case": 		TokenType.K_Case,
+					"default": 		TokenType.K_Default,
+					"break": 		TokenType.K_Break,
+					"continue": 	TokenType.K_Continue,
+					"try": 			TokenType.K_Try,
+					"catch": 		TokenType.K_Catch,
+					"throw": 		TokenType.K_Throw,
+					"print":		TokenType.K_Print,
+					"await":		TokenType.K_Await
+					
+				};
+			}
+
+			if (_keywords.HasKey(kw))
+				return _keywords[kw];
+
+			return TokenType.None;
+		}
+
+
+		/** Get token name */
+		static string GetTokenName(TokenType type)
+		{
+			switch (type)
+			{
+				case TokenType.None:		return "n/a";
+        
+		        case TokenType.DocComment:	return "doc-comment";
+		        
+				case TokenType.Ident:		return "idenfifier";
+				case TokenType.Bool:		return "boolean";
+				case TokenType.Char:		return "char";
+				case TokenType.Int:			return "integer";
+				case TokenType.Float:		return "float";
+				case TokenType.String:		return "string";
+		        case TokenType.AsmStr:		return "asm string";
+		        
+				case TokenType.Operator:	return "operator";
+		        
+				case TokenType.BraceOpen:	return "{";
+				case TokenType.BraceClose:	return "}";
+				case TokenType.ParOpen:		return "(";
+				case TokenType.ParClose:	return ")";
+				case TokenType.SquareOpen:	return "[";
+				case TokenType.SquareClose:	return "]";
+				case TokenType.Comma:		return ",";
+				case TokenType.Dot:			return ".";
+		        case TokenType.Arrow:		return "->";
+				case TokenType.Colon:		return ":";
+				case TokenType.Semicolon:	return ";";
+				case TokenType.Amp:			return "&";
+		        case TokenType.At:			return "@";
+		        case TokenType.MClose:		return "</";
+		        case TokenType.MSelfClose:	return "/>";
+		        case TokenType.Dollar:		return "$";
+        
+		        case TokenType.K_Target:	return "target";
+		        case TokenType.K_Targets:	return "targets";
+		        case TokenType.K_Excludes:	return "excludes";
+				case TokenType.K_Import:	return "import";
+				case TokenType.K_Using:		return "using";
+				case TokenType.K_Typedef:	return "typedef";
+				case TokenType.K_Package:	return "namespace";
+		        case TokenType.K_Template:	return "template";
+		        case TokenType.K_Native:	return "native";
+				case TokenType.K_Class:		return "class";
+				case TokenType.K_Interface:	return "interface";
+				case TokenType.K_Enum:		return "enum";
+				case TokenType.K_Public:	return "public";
+				case TokenType.K_Protected:	return "protected";
+				case TokenType.K_Private:	return "private";
+				case TokenType.K_Static:	return "static";
+		        case TokenType.K_Virtual:	return "virtual";
+				case TokenType.K_Get:		return "get";
+				case TokenType.K_Set:		return "set";
+		        case TokenType.K_Alias:		return "alias";
+		        case TokenType.K_Ajax:		return "__ajax";
+		        case TokenType.K_Router:	return "__router";
+		        case TokenType.K_Routes:	return "__routes";
+		        
+				case TokenType.K_Var:		return "var";
+				case TokenType.K_Return:	return "return";
+
+				case TokenType.K_True:		return "true";
+				case TokenType.K_False:		return "false";
+				case TokenType.K_Null:		return "null";
+				case TokenType.K_This:		return "this";
+				case TokenType.K_Self:		return "self";
+				case TokenType.K_Base:		return "base";
+				case TokenType.K_New:		return "new";
+				case TokenType.K_If:		return "if";
+				case TokenType.K_Else:		return "else";
+				case TokenType.K_For:		return "for";
+				case TokenType.K_Foreach:	return "foreach";
+				case TokenType.K_In:		return "in";
+				case TokenType.K_While:		return "while";
+				case TokenType.K_Switch:	return "switch";
+		        case TokenType.K_Case:		return "case";
+		        case TokenType.K_Default:	return "default";
+				case TokenType.K_Break:		return "break";
+				case TokenType.K_Continue:	return "continue";
+		        case TokenType.K_Try:		return "try";
+		        case TokenType.K_Catch:		return "catch";
+		        case TokenType.K_Throw:		return "throw";
+		        case TokenType.K_Print:		return "print";
+		        case TokenType.K_Await:		return "await";
+			}
+
+			return "n/a";
+		}
+
+	private:
+
+		static map<TokenType> _keywords;
+    }
+
+
+	/** Asm string token */
+	class TokenAsm : Token
+	{
+		/** Construct */
+		new(string asmstr) : base(TokenType.AsmStr, asmstr)
+		{
+		}
+
+		/** Targets */
+		string[] Targets : private _targs = [] { get return _targs; }
+	}
+
+	/** Operator token */
+	class TokenOp : Token
+	{
+		/** Construct */
+		new(OpType op) : base(TokenType.Operator)
+		{
+			_opType = op;
+		}
+
+
+		/** Is pre-op? */
+		bool IsPreOp()
+		{
+			return 	_opType == OpType.Inc ||
+					_opType == OpType.Dec ||
+					_opType == OpType.Sub ||
+					_opType == OpType.Not;
+		}
+
+		/** Is post-op? */
+		bool IsPostOp()
+		{
+			return 	_opType == OpType.Inc ||
+					_opType == OpType.Dec;
+		}
+
+
+		/** Operator type */
+		OpType Op : private _opType { get return _opType; }
+
+
+		/** Get operator name */
+		static string GetOpName(OpType op)
+		{
+			switch (op)
+			{
+				case OpType.Mult:		return "*";
+				case OpType.Div:		return "/";
+				case OpType.Exp:		return "^";
+				case OpType.Add:		return "+";
+				case OpType.Sub:		return "-";
+				case OpType.Mod:		return "%";
+		        
+				case OpType.CmpGT:		return ">";
+				case OpType.CmpLT:		return "<";
+				case OpType.CmpGTE:		return ">=";
+				case OpType.CmpLTE:		return "<=";
+				case OpType.CmpEq:		return "==";
+				case OpType.CmpNEq:		return "!=";
+		        
+				case OpType.And:		return "&&";
+				case OpType.Or:			return "||";
+				case OpType.Not:		return "!";
+		        
+		        case OpType.Cond:		return "?:";
+		        
+				case OpType.Inc:		return "++";
+				case OpType.Dec:		return "--";
+		        
+				case OpType.Assign:		return "=";
+				case OpType.AAdd:		return "+=";
+				case OpType.ASub:		return "-=";
+				case OpType.AMul:		return "*=";
+				case OpType.ADiv:		return "/=";
+				case OpType.AExp:		return "^=";
+				case OpType.AMod:		return "%=";
+		        
+				case OpType.Connect:	return "connect";
+			}
+
+			return "";
+		}
+	}
+
+
+}

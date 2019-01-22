@@ -1,0 +1,1179 @@
+/*
+* eco library (client)
+*
+* lexer.eco
+*/
+
+using std;
+
+
+namespace eco
+{
+
+	/** Lexer state */
+	class LexerState
+	{
+		new(int position, int line, int column)
+		{
+			Position = position;
+			Line = line;
+			Column = column;
+		}
+
+		int Position;
+		int Line;
+		int Column;
+	}
+
+	/** Lexer */
+	class Lexer
+	{
+		/** Construct */
+		new()
+		{
+		}
+
+
+		/** Set contents */
+		void SetContent(string contents)
+		{
+			_contents = _removeComments(contents + " ");
+
+			var start = "//_debug"; if (contents.SubString(0, start.Length()) == start) :console.log(_contents);
+
+			_curPos = 0;
+			_oldPos = 0;
+			_curLine = 1;
+			_curCol = 0;
+			_lineStart = 0;
+			_lastCheck = null;
+			_errors = [];
+		}
+
+		/** Current file ID */
+		string CurrentFileID : protected _currentFileID
+		{
+			get return _currentFileID;
+			set _currentFileID = value;
+		}
+
+		/** Current file name */
+		string CurrentFileName : protected _currentFileName
+		{
+			get return _currentFileName;
+			set _currentFileName = value;
+		}
+
+		/** Get current position */
+		int GetCurPos()
+		{
+			return _curPos;
+		}
+
+		/** Get current line */
+		int GetCurLine()
+		{
+			return _curLine;
+		}
+
+		/** Set current position */
+		void SetCurPos(int curpos)
+		{
+			_curPos = curpos;
+		}
+
+		/** Set current line */
+		void SetCurLine(int curline)
+		{
+			_curLine = curline;
+		}
+
+
+		/** Save state */
+		LexerState SaveState()
+		{
+			return new LexerState(_curPos, _curLine, _curCol);
+		}
+
+		/** Save old state */
+		LexerState SaveOldState()
+		{
+			return new LexerState(_oldPos, _oldLine, _oldCol);
+		}
+
+		/** Restore state */
+		void RestoreState(LexerState state)
+		{
+			_curPos = state.Position;
+			_curLine = state.Line;
+			_curCol = state.Column;
+		}
+
+
+		/** Check if there are more tokens */
+		bool HasNext()
+		{
+			return _curPos < _contents.Length();
+		}
+
+		/** Get next token */
+		Token GetNext()
+		{
+			_oldPos = _curPos;
+			_oldCol = _curCol;
+			_oldLine = _curLine;
+			var token = _getNext();
+
+			if (token)
+			{
+				token.Line = _oldLine;
+				token.Column = _oldCol;
+				token.Position = _oldPos;
+			}
+
+			return token;
+		}
+
+		/** Check next */
+		Token Check()
+		{
+			return _checkNext();
+		}
+
+		/** Check if token type */
+		Token Check(TokenType type)
+		{
+			var tok = Check();
+			if (!tok || tok.Type != type)
+				return null;
+
+			return tok;
+		}
+
+		/** Check if operator type */
+		TokenOp Check(OpType op)
+		{
+			var tok = (TokenOp)Check(TokenType.Operator);
+			if (!tok || tok.Op != op)
+				return null;
+
+			return tok;
+		}
+
+
+		/** Accept next */
+		Token Accept()
+		{
+			var tok = GetNext();
+			if (!tok)
+				Error("Expected token");
+
+			return tok;
+		}
+
+		/** Accept token type */
+		Token Accept(TokenType type, bool throwError = true)
+		{
+			if (throwError)
+			{
+				var tok = Accept();
+				if (!tok)
+					Error("Expected '" + Token.GetTokenName(type) + "'");
+				else if (tok.Type != type)
+				{
+					if (tok.Type == TokenType.Operator)
+						Error("Unexpected operator token '" + TokenOp.GetOpName(((TokenOp)tok).Op) + "'. Expected '" +  Token.GetTokenName(type) + "'");
+					else
+						Error("Unexpected token '" + Token.GetTokenName(tok.Type) + "'. Expected '" + Token.GetTokenName(type) + "'");
+				}
+
+				return tok;
+			}
+			else
+			{
+				var state = SaveOldState();
+				var tok = Check();
+
+				bool error = false;
+				if (!tok)
+				{
+					error = true;
+					ErrorNoThrow("Expected '" + Token.GetTokenName(type) + "'");
+				}
+				else if (tok.Type != type)
+				{
+					error = true;
+					if (tok.Type == TokenType.Operator)
+						ErrorNoThrow("Expected '" +  Token.GetTokenName(type) + "'", state, _oldLine, _oldCol);
+					else
+						ErrorNoThrow("Expected '" + Token.GetTokenName(type) + "'", state, _oldLine, _oldCol);
+				}
+
+				if (!error) 
+				{
+					Accept();
+					return tok;
+				}
+				else
+					return null;
+			}
+		}
+
+		/** Accept op type */
+		TokenOp Accept(OpType op, bool throwError = true)
+		{
+			if (throwError)
+			{
+				var tok = (TokenOp)Accept(TokenType.Operator);
+				if (!tok || tok.Op != op)
+					Error("Expected operator '" + TokenOp.GetOpName(op) + "'");
+
+				return tok;
+			}
+			else
+			{
+				bool error = false;
+				var state = SaveOldState();
+
+				var tok = Check();
+				if (!tok)
+				{
+					error = true;
+					ErrorNoThrow("Expected operator '" + TokenOp.GetOpName(op) + "'", state, _oldLine, _oldCol);
+				}
+				else if (tok.Type != TokenType.Operator)
+				{
+					error = true;
+					ErrorNoThrow("Expected operator '" + TokenOp.GetOpName(op) + "'", state, _oldLine, _oldCol);
+				}
+				else if (((TokenOp)tok).Op != op)
+				{
+					error = true;
+					ErrorNoThrow("Expected operator '" + TokenOp.GetOpName(op) + "'", state, _oldLine, _oldCol);
+				}
+
+				if (!error)
+				{
+					Accept();
+					return (TokenOp)tok;
+				}
+				else
+					return null;
+			}
+		}
+
+
+		/** Accept HTML text */
+		Token AcceptHTMLText()
+		{
+			_lastCheck = null;
+			string outp;
+			//_curPos = _oldPos;
+
+			for (; _curPos < _contents.Length(); _curPos++)
+			{
+				if (_contents[_curPos] == '<')
+					break;
+				else if (_contents[_curPos] != "\n")
+				{
+					if (_contents[_curPos] == "\t")
+						outp += " ";
+					else
+						outp += _contents[_curPos];
+				}
+				else
+					_curLine++;
+			}
+
+			return new Token(TokenType.String, '"' + outp + '"');
+		}
+
+
+		/** Accept HTML attribute */
+		Token AcceptHTMLAttr()
+		{
+			_lastCheck = null;
+			string outp;
+
+			//_curPos = _oldPos;
+
+			while (_curPos < _contents.Length() && (_contents[_curPos] == ' ' || _contents[_curPos] == '\t'))
+				_curPos++;
+
+			while (_curPos < _contents.Length() && (IsAlpha(_contents[_curPos]) || _contents[_curPos] == '-'))
+			{
+				outp += _contents[_curPos];
+				_curPos++;
+			}
+
+			return new Token(TokenType.String, outp);
+		}
+
+
+		/** Revert to position */
+		void Revert(int pos)
+		{
+			int diff = _curPos - pos;
+			_curPos = pos;
+			_curCol -= diff;
+
+			if (_curCol < 1)
+			{
+				_curLine--;
+
+				_curCol = _curPos + 1;
+				for (int c = _curPos; c > -1; c--)
+					if (_contents[c] == '\n')
+					{
+						_curCol = _curPos - c + 1;
+						break;
+					}
+			}
+		}
+
+		/** Search for token */
+		bool Search(TokenType a, TokenType b)
+		{
+			var tok = Accept();
+			while (tok.Type != a && tok.Type != b)
+				tok = Accept();
+
+			return false;
+		}
+
+		/** Search for character */
+		void Find(char chr)
+		{
+			var len = _contents.Length();
+			while (_curPos < len && (_contents[_curPos] != chr))
+			{
+				_curPos++;
+				_curCol = _curPos - _lineStart + 1;
+
+				if (_contents[_curPos] == '\n')
+				{
+					_curLine++;
+					_lineStart = _curPos + 1;
+				}
+			}
+
+			if (_curPos >= len)
+				throw {error: "EOF", line: _curLine, col: _curCol};
+
+			_curPos--;
+		}
+
+
+		/** Error list */
+		ParserError[] Errors : protected _errors = [] { get return _errors; }
+
+
+        /** Throw error */
+		void Error(string msg)
+		{
+			var err = new ParserError(_currentFileID, _currentFileName, msg, _curLine, _curLine, _curCol, _curCol);
+			//_errors.Add(err);
+			//:console.trace();
+			throw err;
+		}
+
+
+		/** Throw error with lexer state for positions */
+		void Error(string msg, LexerState state)
+		{
+			var err = new ParserError(_currentFileID, _currentFileName, msg, state.Line, _curLine, state.Column, _curCol);
+			//:console.trace();
+			throw err;
+		}
+
+		/** Throw error */
+		void Error(string msg, int endLine = 0, int endColumn = 0)
+		{
+			if (endLine == 0) endLine = _curLine;
+			if (endColumn == 0) endColumn = _curCol;
+
+			var err = new ParserError(_currentFileID, _currentFileName, msg, _curLine, endLine, _curCol, endColumn);
+			//_errors.Add(err);
+			//:console.trace();
+			throw err;
+		}
+
+
+		/** Throw error with lexer state for positions */
+		void Error(string msg, LexerState state, int endLine = 0, int endColumn = 0)
+		{
+			if (endLine == 0) endLine = _curLine;
+			if (endColumn == 0) endColumn = _curCol;
+
+			var err = new ParserError(_currentFileID, _currentFileName, msg, state.Line, endLine, state.Column, endColumn);
+			//:console.trace();
+			throw err;
+		}
+
+		/* Throw error with parse node for positions */
+		void Error(string msg, ParseNode node)
+		{
+			var err = new ParserError(_currentFileID, _currentFileName, msg, node.StartLine, node.EndLine, node.StartColumn, node.EndColumn);
+			//:console.trace();
+			throw err;
+		}
+
+
+
+		 /** Register error */
+		void ErrorNoThrow(string msg)
+		{
+			var err = new ParserError(_currentFileID, _currentFileName, msg, _curLine, _curLine, _curCol, _curCol);
+			if (OnErrorRegistered) OnErrorRegistered(err);
+		}
+
+
+		/** Register error with lexer state for positions */
+		void ErrorNoThrow(string msg, LexerState state)
+		{
+			var err = new ParserError(_currentFileID, _currentFileName, msg, state.Line, _curLine, state.Column, _curCol);
+			if (OnErrorRegistered) OnErrorRegistered(err);
+		}
+
+		/** Register error */
+		void ErrorNoThrow(string msg, int endLine = 0, int endColumn = 0)
+		{
+			if (endLine == 0) endLine = _curLine;
+			if (endColumn == 0) endColumn = _curCol;
+
+			var err = new ParserError(_currentFileID, _currentFileName, msg, _curLine, endLine, _curCol, endColumn);
+			if (OnErrorRegistered) OnErrorRegistered(err);
+		}
+
+		/** Register error with lexer state for positions */
+		void ErrorNoThrow(string msg, LexerState state, int endLine = 0, int endColumn = 0)
+		{
+			if (endLine == 0) endLine = _curLine;
+			if (endColumn == 0) endColumn = _curCol;
+
+			var err = new ParserError(_currentFileID, _currentFileName, msg, state.Line, endLine, state.Column, endColumn);
+			if (OnErrorRegistered) OnErrorRegistered(err);
+		}
+
+		/* Register error with parse node for positions */
+		void ErrorNoThrow(string msg, ParseNode node)
+		{
+			var err = new ParserError(_currentFileID, _currentFileName, msg, node.StartLine, node.EndLine, node.StartColumn, node.EndColumn);
+			if (OnErrorRegistered) OnErrorRegistered(err);
+		}
+		function<ParserError> OnErrorRegistered;
+
+		/** Check if character is alphabetical */
+		static bool IsAlpha(char chr)
+		{
+			return (chr >= 'a' && chr <= 'z') || (chr >= 'A' && chr <= 'Z') || (chr == '_');
+		}
+
+		/** Check if character is digit */
+		static bool IsDigit(char chr)
+		{
+			return chr >= '0' && chr <= '9';
+		}
+
+		/** Check if character is whitespace */
+		static bool IsWhite(char chr)
+		{
+			//return chr == ' ' || chr == '\t' || chr == '\n' || chr == (char)<% PHP_EOL %>;
+			return chr == " " || chr == "\t" || chr == "\n";
+		}
+
+		/** Check if character is delimeter */
+		static bool IsDelim(char chr)
+		{
+			return  chr == '(' ||
+		            chr == ')' ||
+		            chr == '{' ||
+		            chr == '}' ||
+		            chr == '[' ||
+		            chr == ']' ||
+		            chr == ',' ||
+		            chr == ';' ||
+		            chr == '+' ||
+		            chr == '-' ||
+		            chr == '*' ||
+		            chr == '/' ||
+		            chr == '^' ||
+		            chr == '%' ||
+		            chr == '<' ||
+		            chr == '>' ||
+		            chr == '=' ||
+		            chr == '!' ||
+		            chr == '&' ||
+		            chr == '|' ||
+		            chr == ':' ||
+		            chr == '@' ||
+		            chr == '$' ||
+		            chr == '?' ||
+		            chr == '.';
+		}
+
+
+	protected:
+
+		int _curLine = 0;
+		int _curCol = 0;
+		int _curPos = 0;
+		int _oldPos = 0;
+		int _oldLine = 0;
+		int _oldCol = 0;
+		int _lineStart = 0;
+
+
+	private:
+		string _contents;
+		Token _lastCheck = null;
+
+
+		string _removeComments(string contents)
+		{
+			string str;
+			int len = contents.Length();
+
+			if (len >= 4)
+			{
+				bool inSingleComment = false;
+				bool inMultiComment = false;
+				bool inString = false;
+				bool inChar = false;
+
+				for (int i = 0; i < len - 1; i++)
+				{
+
+					if (!inSingleComment && !inMultiComment)
+					{
+						if (!inString)
+						{
+							if (!inChar)
+							{
+								if (contents[i] == '\'')
+									inChar = true;
+							}
+							else
+							{
+								if (contents[i] == '\'')
+									inChar = false;
+							}
+						}
+
+						if (!inChar)
+						{
+							if (!inString)
+							{
+								if (contents[i] == '"')
+									inString = true;
+							}
+							else
+							{
+								if (contents[i] == '"')
+									inString = false;
+							}
+						}
+					
+						if (inString || inChar)
+						{
+							if (contents[i] == '\\')
+							{
+								str += '\\';
+								str += contents[i + 1];
+								i++;
+								continue;
+							}
+						}
+					}
+
+					if (!inString && !inChar)
+					{
+						if (contents[i] == '/')
+						{
+							if (contents[i + 1] == '*' && contents[i + 2] != '*')
+							{
+								inMultiComment = true;
+								str += "  ";
+							}
+							else if (!inMultiComment && (contents[i + 1] == '/'))
+							{
+								inSingleComment = true;
+								str += "  ";
+							}
+						}
+
+						if (inMultiComment)
+						{
+							if (contents[i] == '*' && contents[i + 1] == '/')
+							{
+								inMultiComment = false;
+								i += 2;
+								str += "  ";
+							}
+						}
+						else if (inSingleComment)
+						{
+							if (contents[i] == '\n')
+							{
+								inSingleComment = false;
+							}
+						}
+					}
+
+					/*if (!inString)
+					{
+						if (contents[i] == '"')
+							inString = true;
+						else
+						{
+							if (contents[i] == '/')
+							{
+								if (contents[i + 1] == '*' && contents[i + 2] != '*')
+									inMultiComment = true;
+								else if (contents[i + 1] == '/')
+									inSingleComment = true;
+							}
+
+							if (inMultiComment)
+							{
+								if (contents[i] == '*' && contents[i + 1] == '/')
+								{
+									inMultiComment = false;
+									i += 2;
+								}
+							}
+							else if (inSingleComment)
+							{
+								if (contents[i] == '\n')
+								{
+									inSingleComment = false;
+								}
+							}
+						}
+					}
+					else
+					{
+						if (contents[i] == '"')
+							inString = false;
+					}*/
+
+					if (!inMultiComment && !inSingleComment)
+						str += contents[i];
+					else
+					{
+						if (contents[i] == '\n')
+							str += '\n';
+						//else str += ' ';
+					}
+				}
+
+				return str;
+			}
+
+			return "";
+		}
+
+
+		// Remove comments
+		string _removeComments_old(string contents)
+		{
+			string str;
+			int len = contents.Length();
+
+			if (len >= 4)
+			{
+				bool inComment = false;
+				bool inString = false;
+
+				for (int i = 0; i < len - 1; i++)
+				{
+					if (!inString)
+					{
+						if (contents[i] == '"')
+							inString = true;
+						else
+						{
+							if (contents[i] == '/' && contents[i + 1] == '*' && contents[i + 2] != '*')
+								inComment = true;
+
+							if (inComment && contents[i] == '*' && contents[i + 1] == '/')
+							{
+								inComment = false;
+								i += 2;
+							}
+						}
+					}
+					else
+					{
+						if (contents[i] == '"')
+							inString = false;
+					}
+
+					if (!inComment)
+						str += contents[i];
+					else if (contents[i] == '\n')
+						str += '\n';
+				}
+
+				return str;
+			}
+
+			return "";
+		}
+
+
+		// check next
+		Token _checkNext()
+		{
+			if (_lastCheck)
+				return _lastCheck;
+
+			//_lastCheck = _getNext();
+			_lastCheck = GetNext();
+			return _lastCheck;
+		}
+
+
+		// Get next token
+		Token _getNext()
+		{
+			if (_lastCheck)
+			{
+				var tmp = _lastCheck;
+				_lastCheck = null;
+				return tmp;
+			}
+
+			int len = _contents.Length();
+			TokenType state = TokenType.None;
+			string curTok = "";
+
+			if (_curPos >= len)
+				//throw {error: "EOF", line: _curLine, col: _curCol};
+				//Error("Reached end of file");
+				return null;
+
+			for (; _curPos < len; _curPos++)
+			{
+				char cur = _contents[_curPos];
+				_curCol = _curPos - _lineStart + 1;
+
+
+				switch (state)
+				{
+
+					// start
+					case TokenType.None:
+					{
+						if (cur == "\n")
+						{
+							_curLine++;
+							_lineStart = _curPos + 1;
+						}
+						else if (IsWhite(cur))
+							state = TokenType.None;
+						else if (IsAlpha(cur))
+							state = TokenType.Ident;
+						else if (IsDigit(cur))
+							state = TokenType.Int;
+						else if (cur == '\'')
+							state = TokenType.Char;
+						else if (cur == '"')
+							state = TokenType.String;
+						else if (cur == '/' && _contents[_curPos + 1] == '*' && _contents[_curPos + 2] == '*')
+                        {
+                            _curPos += 2;
+                            state = TokenType.DocComment;
+                        }
+                        else if (cur == '<' && _contents[_curPos + 1] == '%')
+                        {
+                            _curPos++;
+                            state = TokenType.AsmStr;
+                        }
+
+
+                        // symbols
+                        else if (IsDelim(cur))
+                        {
+                        	_curPos++;
+                            
+							switch (cur)
+                            {
+                                case '{':   return new Token(TokenType.BraceOpen);
+                                case '}':   return new Token(TokenType.BraceClose);
+                                case '[':   return new Token(TokenType.SquareOpen);
+                                case ']':   return new Token(TokenType.SquareClose);
+                                case '(':   return new Token(TokenType.ParOpen);
+                                case ')':   return new Token(TokenType.ParClose);
+								case ',':   return new Token(TokenType.Comma);
+                                case ':':   return new Token(TokenType.Colon);
+                                case ';':   return new Token(TokenType.Semicolon);
+                                case '@':   return new Token(TokenType.At);
+                                case '$':   return new Token(TokenType.Dollar);
+                                case '?':   return new TokenOp(OpType.Cond);
+                                case '.':	return new Token(TokenType.Dot);
+
+                                default: break;
+                            }
+                            
+							 state = TokenType.Operator;
+							_curPos -= 2;
+							continue;
+                        }
+
+                        // error
+                        else
+                        	Error("Unexpected character '" + cur + "'");
+
+						break;
+					}
+
+					// Doc comment
+                    case TokenType.DocComment:
+                    {
+                        if (cur == '*' && _contents[_curPos + 1] == '/')
+                        {
+                            _curPos += 2;
+                            var docComment = "";
+                            var tmpComment = (string)((object)curTok.SubString(1, curTok.Length() - 1)).trim();
+							var parts = tmpComment.Split("\n");
+							foreach (var part in parts)
+								docComment += ((string)((object)part).trim() + "\n");
+                            return new Token(TokenType.DocComment, docComment);
+                        }
+						else if (cur == '\n')
+							_curLine++;
+                 
+                        break;
+                    }
+                        
+                    // Asm string
+                    case TokenType.AsmStr:
+                    {
+                        if (cur == '%' && _contents[_curPos + 1] == '>')
+                        {
+                            _curPos += 2;
+                            
+                            string code = curTok.SubString(1, curTok.Length() - 1);
+                            
+
+                            TokenAsm asmtok = null;
+                            if (code[0] == '[')
+                            {
+                            	string tstr;
+                            	int tc = 1;
+                            	for (; tc < code.Length(); tc++)
+                            	{
+                            		if (code[tc] == ']')
+                            		{
+                            			tc += 2;
+                            			break;
+                            		}
+
+                            		tstr += code[tc];
+                            	}
+
+                                asmtok = new TokenAsm(curTok.SubString(tc, curTok.Length() - 1));
+                                asmtok.Targets.Add(tstr);
+                            }
+                            else
+                                asmtok = new TokenAsm(curTok.SubString(1, curTok.Length() - 1));
+                            
+                            return asmtok;
+                        }
+                        else if (cur == '\n')
+                            _curLine++;
+                        
+                        break;
+                    }
+                        
+
+
+
+					// Identifier or keyword
+					case TokenType.Ident:
+					{
+						if (IsDelim(cur) || IsWhite(cur))
+						{
+							TokenType kw = Token.GetKeyword(curTok);
+							if (kw != TokenType.None)
+								return new Token(kw, curTok);
+							else if (curTok == "true")
+								return new Token(TokenType.Bool, true);
+							else if (curTok == "false")
+								return new Token(TokenType.Bool, false);
+							else
+								return new Token(TokenType.Ident, curTok);
+						}
+						//else if (!IsAlpha(cur) && !IsDigit(cur))
+						//	Error("Illegal character '" + cur + "'");
+                        
+						break;
+					}
+
+					// Character
+					case TokenType.Char:
+					{
+						if (cur == '\'')
+						{
+							_curPos++;
+                            return new Token(TokenType.Char, "'" + curTok.SubString(1, curTok.Length() - 1) + "'");
+						}
+                        //else if (cur == '\\')
+                          //  cur = GetEscapeChar(_text[++_curPos]);
+						else if (cur == '\n')
+							Error("Illegal new line in character");
+                        
+						break;
+					}
+
+
+					// Integer
+					case TokenType.Int:
+					{
+						if (cur == '.')
+							state = TokenType.Float;
+						else if (IsDelim(cur) || IsWhite(cur))
+							return new Token(TokenType.Int, curTok.ToInt());
+						else if (IsAlpha(cur))
+							Error("Unexpected character '" + cur + "'");
+                        
+						break;
+					}
+
+					// Float
+					case TokenType.Float:
+					{
+						if (cur == '.' || IsAlpha(cur))
+							Error("Unexpected character '" + cur + "'");
+						else if (IsDelim(cur) || IsWhite(cur))
+							return new Token(TokenType.Float, curTok.ToFloat());
+                        
+						break;
+					}
+
+					// String
+					case TokenType.String:
+					{
+						if (cur == '"')
+						{
+							_curPos++;
+							return new Token(TokenType.String, '"' + curTok.SubString(1, curTok.Length() - 1) + '"');
+						}
+						else if (cur == "\n")
+							_curLine++;
+                        
+						break;
+					}
+
+
+					// Operator
+					case TokenType.Operator:
+					{
+						switch (cur)
+						{
+                            case '+':
+							{
+								if (_curPos < len)
+								{
+									char next = _contents[++_curPos];
+									_curPos++;
+                                    
+									if (next == '=')		return new TokenOp(OpType.AAdd);
+									else if (next == '+')	return new TokenOp(OpType.Inc);
+                                    
+									_curPos--;
+								}
+								
+								return new TokenOp(OpType.Add);
+							}
+                                
+                            case '-':
+							{
+								if (_curPos < len)
+								{
+									char next = _contents[++_curPos];
+									_curPos++;
+                                    
+									if (next == '=')		return new TokenOp(OpType.ASub);
+									else if (next == '-')	return new TokenOp(OpType.Dec);
+                                    else if (next == '>')   return new Token(TokenType.Arrow);
+                                    
+									_curPos--;
+								}
+								
+								return new TokenOp(OpType.Sub);
+							}
+                                
+                            case '*':
+							{
+								if (_curPos < len && _contents[++_curPos] == '=')
+								{
+									_curPos++;
+									return new TokenOp(OpType.AMul);
+								}
+								
+								return new TokenOp(OpType.Mult);
+							}
+                                
+                            case '/':
+                            {
+                                if (_curPos < len)
+								{
+									char next = _contents[++_curPos];
+									_curPos++;
+                                    
+									if (next == '=')		return new TokenOp(OpType.ADiv);
+                                    else if (next == '>')   return new Token(TokenType.MSelfClose);
+                                    
+									_curPos--;
+								}
+								
+								return new TokenOp(OpType.Div);
+							}
+                                
+                            case '^':
+							{
+								if (_curPos < len && _contents[++_curPos] == '=')
+								{
+									_curPos++;
+									return new TokenOp(OpType.AExp);
+								}
+								
+								return new TokenOp(OpType.Exp);
+							}
+                                
+                            case '%':
+							{
+								if (_curPos < len && _contents[++_curPos] == '=')
+								{
+									_curPos++;
+									return new TokenOp(OpType.AMod);
+								}
+								
+								return new TokenOp(OpType.Mod);
+							}
+                                
+                            case '=':
+							{
+								if (_curPos < len && _contents[++_curPos] == '=')
+								{
+									_curPos++;
+									return new TokenOp(OpType.CmpEq);
+								}
+								
+								return new TokenOp(OpType.Assign);
+							}
+                                
+                            case '<':
+							{
+								if (_curPos < len)
+								{
+									char next = _contents[++_curPos];
+									_curPos++;
+                                    
+									if (next == '=')		return new TokenOp(OpType.CmpLTE);
+									else if (next == '-')	return new TokenOp(OpType.Connect);
+                                    else if (next == '/')   return new Token(TokenType.MClose);
+                                    
+									_curPos--;
+								}
+								
+								return new TokenOp(OpType.CmpLT);
+							}
+                                
+                            case '>':
+							{
+								if (_curPos < len && _contents[++_curPos] == '=')
+								{
+									_curPos++;
+									return new TokenOp(OpType.CmpGTE);
+								}
+								
+								return new TokenOp(OpType.CmpGT);
+							}
+                                
+                            case '!':
+							{
+								if (_curPos < len && _contents[++_curPos] == '=')
+								{
+									_curPos++;
+									return new TokenOp(OpType.CmpNEq);
+								}
+								
+								return new TokenOp(OpType.Not);
+							}
+                                
+                            case '&':
+							{
+								if (_curPos < len && _contents[++_curPos] == '&')
+								{
+									_curPos++;
+									return new TokenOp(OpType.And);
+								}
+								
+								//Error(string("Unknown operator '&'"), state);
+								return new Token(TokenType.Amp);
+							}
+                                
+                            case '|':
+							{
+								if (_curPos < len && _contents[++_curPos] == '|')
+								{
+									_curPos++;
+									return new TokenOp(OpType.Or);
+								}
+								
+								Error("Unknown operator '|'");
+							}
+                                
+                            default:
+                                break;
+						}
+                        
+						break;
+					}
+
+				}
+
+
+
+				// append token
+				if (state != TokenType.None)
+                {
+                    if (state == TokenType.Char || state == TokenType.String)
+                    {
+                        if (cur == '\\')
+                            curTok += _getEscapeChar(_contents[++_curPos]);
+                        else
+                            curTok += cur;
+                    }
+                    else
+                        curTok += cur;
+
+                }
+                else
+                    _oldPos = _curPos;
+			}
+		}
+
+
+		// Get escape character
+		string _getEscapeChar(char esc)
+	    {
+	        switch (esc)
+	        {
+	            case 'n':   return "\\n";
+	            case 't':   return "\\t";
+	            case '\\':  return "\\\\";
+	            case '\'':  return "\\\'";
+	            case '"':   return "\\\"";
+	                
+	            default: break;
+	        }
+	        
+	        return "" + esc;
+	    }
+
+	}
+}

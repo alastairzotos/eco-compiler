@@ -1,0 +1,577 @@
+/*
+ * eco library (client)
+ *
+ * compilermodel.eco
+ */
+
+using std;
+
+
+namespace eco
+{
+
+	/** Compilation target */
+	enum CompilationTarget
+	{
+		Client,
+		Server,
+		Shared
+	}
+
+
+	/** Model type */
+	enum CompilationModelType
+	{
+		File,
+		Component
+	}
+
+
+	/** Compiler model */
+	class CompilerModel
+	{
+		string					FileID;
+		string 					Name;
+		CompilationTarget 		Target;
+		CompilationModelType	ModelType;
+		string 					Code;
+		int 					LineCount;
+
+		TypeNode[] 				Usings;
+		NamespaceNode[] 		ParseNodes;
+		ImportNode[]			Imports;
+
+		Namespace[] 			Namespaces;
+		Method[] 				Methods;
+		Property[]				Properties;
+
+		ParserError[]			Errors;
+
+
+		new(Compiler compiler, string fileId, string name, CompilationTarget target, string code)
+		{
+			_compiler = compiler;
+			_semanticAnalyser = _compiler.Analyser;
+			_parser = _compiler.Parser;
+
+			FileID = fileId;
+			Name = name;
+			Target = target;
+			Code = code;
+			ModelType = CompilationModelType.File;
+
+			Imports = [];
+			Usings = [];
+			ParseNodes = [];
+
+			Namespaces = [];
+			Methods = [];
+			Properties = [];
+		}
+
+		virtual void Build()
+		{
+		}
+
+		virtual void BuildSkeleton()
+		{
+
+		}
+
+		/** Prepare a model for build. Only build during execution of callback */
+		void PrepareForBuild(function<> cb)
+		{
+			_compiler.Parser.CurrentFileID = FileID;
+			_compiler.Parser.CurrentFileName = Name;
+			_compiler.Parser.CurrentNamespace = GetSymbolTableByTarget();
+			_compiler.Parser.SetContent(Code);
+
+			_compiler.Analyser.FileName = Name;
+
+			_compiler.Analyser.ClearErrors();
+			_compiler.Analyser.FileID = FileID;
+			_compiler.Analyser.FileName = Name;
+
+			Namespace.ClearStaticData();
+
+			//_semanticAnalyser.Verifier.Reset(FileID, GetSymbolTableByTarget());
+
+			
+			try
+			{
+				if (cb) cb();
+			}
+			catch (ParserError err)
+			{
+				_compiler.AddParserError(err);
+			}
+
+			foreach (var e in _compiler.Analyser.Errors)
+				_compiler.AddParserError(e);
+		}
+
+		/** Get symbol at position, with priority given to methods */
+		Symbol GetSymbolAtPosition(int line, int column)
+		{
+			var property = GetPropertyAtPosition(line, column);
+			if (property)
+				return property;
+				
+			var method = GetMethodAtPosition(line, column);
+			if (method)
+				return method;
+
+			return GetNamespaceAtPosition(line, column);
+		}
+
+
+		/** Get property at position */
+		Property GetPropertyAtPosition(int startLine, int startColumn)
+		{
+			foreach (var property in Properties)
+			{
+				// Single-line property
+				if (property.StartLine == property.EndLine)
+				{
+					if (startLine == property.StartLine && startColumn >= property.StartColumn && startColumn <= property.EndColumn)
+						return property;
+				}
+				else
+				{
+					if (startLine > property.StartLine && startLine < property.EndLine)
+						return property;
+
+					if (startLine == property.StartLine && startColumn >= property.StartColumn)
+						return property;
+
+					if (startLine == property.EndLine && startColumn <= property.EndColumn)
+						return property;
+				}
+			}
+
+			return null;
+		}
+
+		/** Get method at position */
+		Method GetMethodAtPosition(int startLine, int startColumn)
+		{
+			foreach (var method in Methods)
+			{
+
+				// Single-line method
+				if (method.DefinitionStartLine == method.DefinitionEndLine)
+				{
+					if (startLine == method.DefinitionStartLine && startColumn >= method.DefinitionStartColumn && startColumn <= method.DefinitionEndColumn)
+						return method;
+				}
+				else
+				{
+					if (startLine > method.DefinitionStartLine && startLine < method.DefinitionEndLine)
+						return method;
+
+					if (startLine == method.DefinitionStartLine && startColumn >= method.DefinitionStartColumn)
+						return method;
+
+					if (startLine == method.DefinitionEndLine && startColumn <= method.DefinitionEndColumn)
+						return method;
+				}
+			}
+
+			return null;
+		}
+
+
+		/** Get namespace at position */
+		Namespace GetNamespaceAtPosition(int startLine, int startColumn)
+		{
+			// Need to scan backwards as nested symbols come later
+			var len = Namespaces.Length();
+
+			for (int n = len; n > 0; n--)
+			{
+				var ns = Namespaces[n - 1];
+
+				if (startLine > ns.StartLine && startLine < ns.EndLine)
+					return ns;
+
+				if (startLine == ns.StartLine && startColumn >= ns.StartColumn)
+					return ns;
+
+				if (startLine == ns.EndLine && startColumn <= ns.EndColumn)
+					return ns;
+			}
+
+			return null;
+		}
+
+
+		/** Get namespace definition at position */
+		Namespace GetNamespaceDefinitionAtPosition(int startLine, int startColumn)
+		{
+			foreach (var ns in Namespaces)
+			{
+				if (startLine >= ns.StartLine && startLine <= ns.DefinitionEndLine)
+				{
+					if (startColumn >= ns.StartColumn && startColumn <= ns.DefinitionEndColumn)
+						return ns;
+				}
+			}
+
+			return null;
+		}
+
+
+		/* Get how far away methods and namespace-ish symbols are from the end of a method */
+		object GetSymbolOffsetsFromMethod(Method method)
+		{
+			return GetSymbolOffsetsFromLine(method.DefinitionEndLine);
+		}
+
+		/** Get how far away methods and namespace-ish symbols are from after line */
+		object GetSymbolOffsetsFromLine(int line)
+		{
+			var foundMethods = [];
+			var foundNamespaces = [];
+
+			foreach (var mth in Methods)
+			{
+				if (mth.DefinitionStartLine >= line)
+					foundMethods.Add(mth);
+			}
+
+			foreach (var ns in Namespaces)
+			{
+				if (ns.StartLine >= line || ns.EndLine >= line)
+					foundNamespaces.Add(ns);
+			}
+
+			return {methods: foundMethods, namespaces: foundNamespaces};
+		}
+
+
+		/** Adjust symbol offsets */
+		void AdjustSymbolOffsets(int sizeDifference, int posDifference, Namespace[] namespaces, Method[] methods, Namespace ignoreNs = null)
+		{
+			foreach (var method in methods)
+			{
+				method.StartLine += sizeDifference;
+				method.EndLine += sizeDifference;
+				method.DefinitionStartLine += sizeDifference;
+				method.DefinitionEndLine += sizeDifference;
+				method.DefinitionStartPosition += posDifference;
+				method.DefinitionEndPosition += posDifference;
+			}
+
+			foreach (var ns in namespaces)
+			{
+				if (ns != ignoreNs)
+					ns.StartLine += sizeDifference;
+
+				ns.EndLine += sizeDifference;
+			}
+		}
+
+
+		SymbolTable GetSymbolTableByTarget()
+		{
+			if (Target == CompilationTarget.Client)
+				return _compiler.ClientSymbolTable;
+			else if (Target == CompilationTarget.Server)
+				return _compiler.ServerSymbolTable;
+			else if (Target == CompilationTarget.Shared)
+				return _compiler.SharedSymbolTable;
+		}
+
+		Namespace[] ComputeUsedNamespaces()
+		{
+			var symbolTable = GetSymbolTableByTarget();
+			Namespace[] used = [];
+
+			foreach (var use in Usings)
+				used.Add(symbolTable.GetNamespaceFromTypeNode(use));
+
+			return used;
+		}
+
+
+	protected:
+		Compiler _compiler;
+		SemanticAnalyser _semanticAnalyser;
+		Parser _parser;
+	}
+
+
+	/** File compiler model */
+	class FileCompilerModel : CompilerModel
+	{
+		new(Compiler compiler, string fileId, string name, CompilationTarget target, string code)
+			: base(compiler, fileId, name, target, code)
+		{
+		}
+
+
+		void BuildSkeleton()
+		{
+			PrepareForBuild(function() {
+				_semanticAnalyser.BuildSkeleton(FileID, GetSymbolTableByTarget(), (NamespaceNode[])_parser.ParseCodeFile().nodes);
+			});
+		}
+
+		void Build()
+		{
+
+			// Choose which symbol table to build against 
+			var symbolTable = GetSymbolTableByTarget();
+
+			PrepareForBuild(function() {
+
+				// Parse file
+				_parser.CaptureExpressions = Target == CompilationTarget.Server || Target == CompilationTarget.Shared;
+				var parseResult = _parser.ParseCodeFile();
+				var imports = (ImportNode[])parseResult.imports;
+				var usings = (TypeNode[])parseResult.usings;
+				var parseNodes = (NamespaceNode[])parseResult.nodes;
+				var lineCount = _parser.GetCurLine();
+
+				// Symbol table gets full span of file
+				symbolTable.SetLineCount(lineCount);
+
+				// Build skeletons
+				_semanticAnalyser.BuildSkeleton(FileID, symbolTable, parseNodes);
+
+				// Set used namespaces for this file
+				_compiler.ApplyImports();
+				_semanticAnalyser.UseNamespaces(FileID, symbolTable, usings);
+
+				// Build full
+				object buildResult = _semanticAnalyser.BuildFull(FileID, symbolTable, parseNodes);
+
+				// Grab namespaces from build
+				var namespaces = (Namespace[])buildResult.namespaces;
+				namespaces.Enque(symbolTable);
+
+				// Update model
+				Imports = imports;
+				Usings = usings;
+				ParseNodes = parseNodes;
+				Namespaces = namespaces;
+				Methods = (Method[])buildResult.methods;
+				Properties = (Property[])buildResult.properties;
+				LineCount = lineCount;
+
+			});
+		}
+	}
+
+
+	/** Server component compiler model */
+	class ServerComponentCompilerModel : CompilerModel
+	{
+		new(Compiler compiler, string fileId, string name, string code)
+			: base(compiler, fileId, name, CompilationTarget.Server, code)
+		{
+			//Name += " (server)";
+			ModelType = CompilationModelType.Component;
+		}
+
+		void BuildSkeleton()
+		{
+			PrepareForBuild(function() {
+				_semanticAnalyser.BuildSkeleton(FileID, _compiler.ServerSymbolTable, (NamespaceNode[])[_parser.ParseServerComponent(Name)]);
+			});
+		}
+		
+		void Build()
+		{
+			PrepareForBuild(function() {
+				
+				// Parse file
+				_parser.CaptureExpressions = true;
+				_parser.CurrentFileName = Name + "-server.eco";
+				var parseResult = _parser.ParseServerComponent(Name);
+				var lineCount = _parser.GetCurLine();
+
+				// Symbol table gets full span of file
+				_compiler.ServerSymbolTable.SetLineCount(lineCount);
+
+
+				// Build
+				_semanticAnalyser.BuildSkeleton(FileID, _compiler.ServerSymbolTable, [parseResult]);
+				object buildResult = _semanticAnalyser.BuildFull(FileID, _compiler.ServerSymbolTable, [parseResult]);
+				
+				// Grab namespaces from build
+				var namespaces = (Namespace[])buildResult.namespaces;
+				namespaces.Enque(_compiler.ServerSymbolTable);
+
+				// Component table gets full span of file
+				_compiler.ServerSymbolTable.SetLineCount(lineCount);
+
+
+				// Update model
+				Usings = [];
+				ParseNodes = [parseResult];
+				Namespaces = namespaces;
+				Methods = (Method[])buildResult.methods;
+				Properties = (Property[])buildResult.properties;
+				LineCount = lineCount;
+
+			});
+		}
+	}
+
+	/** Client component compiler model */
+	class ClientComponentCompilerModel : CompilerModel
+	{
+		new(Compiler compiler, string fileId, string name, string code)
+			: base(compiler, fileId, name, CompilationTarget.Client, code)
+		{
+			//Name += " (client)";
+			ModelType = CompilationModelType.Component;
+		}
+
+		void BuildSkeleton()
+		{
+			PrepareForBuild(function() {
+				_semanticAnalyser.BuildSkeleton(FileID, _compiler.ClientSymbolTable, (NamespaceNode[])[_parser.ParseClientComponent(Name)]);
+			});
+		}
+		
+		void Build()
+		{
+			PrepareForBuild(function() {
+
+				// Parse file
+				_parser.CaptureExpressions = false;
+				_parser.CurrentFileName = Name + "-client.eco";
+				var parseResult = _parser.ParseClientComponent(Name);
+				var lineCount = _parser.GetCurLine();
+
+				// Symbol table gets full span of file
+				_compiler.ClientSymbolTable.SetLineCount(lineCount);
+
+				// Build
+				_semanticAnalyser.BuildSkeleton(FileID, _compiler.ClientSymbolTable, (NamespaceNode[])[parseResult]);
+				object buildResult = _semanticAnalyser.BuildFull(FileID, _compiler.ClientSymbolTable, (NamespaceNode[])[parseResult]);
+
+				// Grab namespaces from build
+				var namespaces = (Namespace[])buildResult.namespaces;
+				namespaces.Enque(_compiler.ClientSymbolTable);
+
+				// Component table gets full span of file
+				_compiler.ClientSymbolTable.SetLineCount(lineCount);
+
+
+				// Update model
+				Usings = [];
+				ParseNodes = [parseResult];
+				Namespaces = namespaces;
+				Methods = (Method[])buildResult.methods;
+				Properties = (Property[])buildResult.properties;
+				LineCount = lineCount;
+			});
+		}
+	}
+
+
+	/** Initialiser compiler model */
+	class InitialiserCompilerModel : CompilerModel
+	{
+		new(Compiler compiler, string fileId, string name, string code)
+			: base(compiler, fileId, name, CompilationTarget.Server, code)
+		{
+			//Name += " (client)";
+		}
+
+		void BuildSkeleton()
+		{
+			PrepareForBuild(function() {
+				_semanticAnalyser.BuildSkeleton(FileID, _compiler.ServerSymbolTable, (NamespaceNode[])[_parser.ParseInitialiser(Name)]);
+			});
+		}
+		
+		void Build()
+		{
+			PrepareForBuild(function() {
+
+				// Parse file
+				var parseResult = _parser.ParseInitialiser(Name);
+				var lineCount = _parser.GetCurLine();
+
+				// Symbol table gets full span of file
+				_compiler.ServerSymbolTable.SetLineCount(lineCount);
+
+				// Build
+				_semanticAnalyser.BuildSkeleton(FileID, _compiler.ServerSymbolTable, (NamespaceNode[])[parseResult]);
+				object buildResult = _semanticAnalyser.BuildFull(FileID, _compiler.ServerSymbolTable, (NamespaceNode[])[parseResult]);
+
+				// Grab namespaces from build
+				var namespaces = (Namespace[])buildResult.namespaces;
+				namespaces.Enque(_compiler.ServerSymbolTable);
+
+				// Component table gets full span of file
+				_compiler.ServerSymbolTable.SetLineCount(lineCount);
+
+
+				// Update model
+				Usings = [];
+				ParseNodes = [parseResult];
+				Namespaces = namespaces;
+				Methods = (Method[])buildResult.methods;
+				Properties = (Property[])buildResult.properties;
+				LineCount = lineCount;
+			});
+		}
+	}
+
+
+	/** Service compiler model */
+	class ServiceCompilerModel : CompilerModel
+	{
+		new(Compiler compiler, string fileId, string name, string code)
+			: base(compiler, fileId, name, CompilationTarget.Server, code)
+		{
+			//Name += " (client)";
+		}
+
+		void BuildSkeleton()
+		{
+			PrepareForBuild(function() {
+				_semanticAnalyser.BuildSkeleton(FileID, _compiler.ServerSymbolTable, (NamespaceNode[])[_parser.ParseService(Name)]);
+			});
+		}
+		
+		void Build()
+		{
+			PrepareForBuild(function() {
+
+				// Parse file
+				var parseResult = _parser.ParseService(Name);
+				var lineCount = _parser.GetCurLine();
+
+				// Symbol table gets full span of file
+				_compiler.ServerSymbolTable.SetLineCount(lineCount);
+
+				// Build
+				_semanticAnalyser.BuildSkeleton(FileID, _compiler.ServerSymbolTable, (NamespaceNode[])[parseResult]);
+				object buildResult = _semanticAnalyser.BuildFull(FileID, _compiler.ServerSymbolTable, (NamespaceNode[])[parseResult]);
+
+				// Grab namespaces from build
+				var namespaces = (Namespace[])buildResult.namespaces;
+				namespaces.Enque(_compiler.ServerSymbolTable);
+
+				// Component table gets full span of file
+				_compiler.ServerSymbolTable.SetLineCount(lineCount);
+
+
+				// Update model
+				Usings = [];
+				ParseNodes = [parseResult];
+				Namespaces = namespaces;
+				Methods = (Method[])buildResult.methods;
+				Properties = (Property[])buildResult.properties;
+				LineCount = lineCount;
+			});
+		}
+	}
+
+}

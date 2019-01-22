@@ -1,0 +1,332 @@
+/*
+ * eco library (client)
+ *
+ * symbols.eco
+ */
+
+using std;
+
+
+namespace eco
+{
+
+	/** Parameter documentation */
+	class ParamDoc
+	{
+		new()
+		{
+			_subParams = [];
+		}
+
+		string Name : private _name
+		{
+			get return _name;
+			set _name = value;
+		}
+
+		string Description : private _desc
+		{
+			get return _desc;
+			set _desc = value;
+		}
+
+		ParamDoc[] SubParams : private _subParams
+		{
+			get return _subParams;
+			set _subParams = value;
+		}
+
+		void AddSubParam(ParamDoc param)
+		{
+			_subParams.Add(param);
+		}
+
+		ParamDoc GetSubParam(string name)
+		{
+			foreach (var param in _subParams)
+				if (param.Name == name)
+					return param;
+				
+			return null;
+		}
+
+		string GetFunctionInsertSnippet(FunctionType type, object counter)
+		{
+			var snippet = "function(";
+            counter.count = counter.count + 1;
+
+			int startCount = (int)counter.count;
+			for (int p = 0; p < type.ParamTypes.Length(); p++)
+			{
+				var param = type.ParamTypes[p];
+				var subParam = _subParams[p];
+
+				if (counter.count > startCount) snippet += ", ";
+				snippet += param.Signature() + ' ${' + (int)counter.count + ":" + subParam.Name + "}";
+
+				counter.count = counter.count + 1;
+			}
+
+			snippet += ")";
+
+			if (type.ReturnType && type.ReturnType != Interface.VoidType && type.ReturnType != Interface.ObjectType)
+				snippet += ":" + type.ReturnType.Signature();
+
+			return snippet + " {$" + (int)counter.count + "}";
+		}
+
+		string ToString()
+		{
+			return _name + ": " + _desc;
+		}
+
+		static ParamDoc Create(string name, string desc, ParamDoc[] subParams = null)
+		{
+			var doc = new ParamDoc();
+
+			doc.Name = name;
+			doc.Description = desc;
+			doc.SubParams = subParams;
+
+			return doc;
+		}
+
+	}
+
+	/** Symbol documentation */
+	class SymbolDoc
+	{
+		new()
+		{
+			_params = [];
+		}
+
+		new(string doc)
+		{
+			_doc = doc;
+			_params = [];
+
+			ParseDoc();
+		}
+
+		string RawDoc : private _doc
+		{
+			get return _doc;
+		}
+
+		string Description : private _desc
+		{
+			get return _desc;
+			set _desc = value;
+		}
+
+		string Returns : private _returns
+		{
+			get return _returns;
+			set _returns = value;
+		}
+
+		ParamDoc[] Params : private _params
+		{
+			get return _params;
+			set _params = value;
+		}
+
+		ParamDoc GetParam(string name)
+		{
+			foreach (var param in _params)
+				if (param.Name == name)
+					return param;
+
+			return null;
+		}
+
+		string ToString(bool forOutput = false, string indent = "")
+		{
+			if (forOutput)
+			{
+				var output = indent + "/**\n";
+				//output += indent + " * " + _desc;
+				var splitDesc = _desc.Split("\n");
+				foreach (var part in splitDesc)
+				{
+					if (((object)part).trim() != "")
+						output += indent + " * " + part + "\n";
+				}
+
+				foreach (var param in _params)
+					output += ("\n" + indent + " * " + param.ToString());
+
+				if (_returns != "")
+					output += ("\n" + indent + " * returns: " + _returns);
+
+				output += "\n" + indent + " */\n";
+
+				return output;
+			}
+			else
+			{
+				var output = _desc;
+
+				foreach (var param in _params)
+					output += ("\n" + param.ToString());
+
+				if (_returns != "")
+					output += ("\nreturns: " + _returns);
+
+				return output;
+			}
+		}
+
+		string GetMethodInsertSnippet(Method method)
+		{
+			var snippet = method.Name + "(";
+
+			var counter = (map){count: 1};
+			foreach (var param in method.Parameters)
+			{
+				if (counter.count > 1) snippet += ", ";
+
+				if (param.Type.IsFunction())
+				{
+					var found = GetParam(param.Name);
+					if (found)
+						snippet += found.GetFunctionInsertSnippet((FunctionType)param.Type, counter);
+					else
+						snippet += ((FunctionType)param.Type).GetInsertSnippet(counter);
+				}
+				else
+					snippet += '${' + ("" + (int)counter.count) + ':' + param.Name + '}';
+
+
+				counter.count = counter.count + 1;
+			}
+
+			return snippet + ")";
+		}
+
+
+		static SymbolDoc Create(string desc, ParamDoc[] params = null)
+		{
+			if (!params) params = [];
+
+			var doc = new SymbolDoc();
+
+			doc.Description = desc;
+			doc.Params = params;
+
+			return doc;
+		}
+
+
+	private:
+
+		void ParseDoc()
+		{
+			_doc = (string)((object)_doc).trim();
+			var lines = _doc.Split("\n");
+
+			foreach (var line in lines)
+			{
+				line = CleanLine(line);
+				
+				// If command
+				if (line[0] == "@")
+					ParseCommand(line);
+
+				// Otherwise it's a description
+				else
+					_desc += (line + "\n");
+			}
+		}
+
+
+		void ParseCommand(string line)
+		{
+			var parts = line.Split(" ");
+			var command = parts[0];
+			var rest = line.SubString(command.Length() + 1, line.Length() - command.Length() - 1);
+
+			var lexer = new Lexer();
+			lexer.SetContent(rest);
+
+			if (command == "@param")
+				_params.Add(ParseParam(lexer));
+
+			else if (command = "@returns")
+				_returns = rest;
+		}
+
+		ParamDoc ParseParam(Lexer lexer)
+		{
+
+			ParamDoc doc = new ParamDoc();
+
+			doc.Name = (string)lexer.Accept(TokenType.Ident).Value;
+
+			if (lexer.Check(OpType.CmpLT))
+			{
+				lexer.Accept();
+
+				doc.AddSubParam(ParseParam(lexer));
+
+				while (lexer.Check(TokenType.Comma))
+				{
+					lexer.Accept();
+					doc.AddSubParam(ParseParam(lexer));
+				}
+
+				lexer.Accept(OpType.CmpGT);
+			}
+
+			if (lexer.Check(TokenType.String))
+			{
+				var desc = (string)lexer.Accept(TokenType.String).Value;
+				desc = desc.SubString(1, desc.Length() - 2);
+				doc.Description = desc;
+			}
+
+
+			return doc;
+			
+
+			/*
+			Normal parameter
+			@param myparam Some description
+
+			Parameter that is a function type
+			@param iterator<value("the current value")> Function to call for each thing 
+			*/
+		}
+
+
+		// Remove leading asterisk
+		string CleanLine(string line)
+		{
+			var newLine = "";
+			bool foundAsterisk = false;
+			bool lineStarted = false;
+
+			for (int c = 0; c < line.Length(); c++)
+			{
+				var chr = line[c];
+
+				if (foundAsterisk && chr != " " && chr != "\t")
+					lineStarted = true;
+
+				if (lineStarted)
+					newLine += chr;
+
+				if (chr == "*")
+					foundAsterisk = true;
+			}
+
+			return newLine;
+		}
+	}
+
+}
+
+
+
+

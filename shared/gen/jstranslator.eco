@@ -1,0 +1,2285 @@
+/*
+ * eco library (client)
+ *
+ * jstranslator.eco
+ */
+
+using std;
+
+
+namespace eco
+{
+
+
+	/** JS translator */
+	class JSTranslator : Translator
+	{
+		new(int packageId, string projectName, CompilationTarget target, ImportNode[] imports, SymbolTable symbolTable, SymbolTable serverSymbolTable, SymbolTable sharedSymbolTable) : base(projectName, symbolTable, sharedSymbolTable)
+		{
+			_packageId = packageId;
+			_serverSymbolTable = serverSymbolTable;
+			_namespaceDepth = 0;
+			_inPlugin = false;
+			_target = target;
+			_imports = imports;
+
+			AddCommonCode("var __extends = this.__extends || function (derived, base) {function __() { this.constructor = derived; } __.prototype = base.prototype; derived.prototype = new __();};");
+			AddCommonCode("function __performAwait(responderType, responderMethod, args, cb) {\n\tvar xhttp = new XMLHttpRequest();\n\txhttp.onreadystatechange = function() {\n\t\tif (this.readyState == 4) {\n\t\t\ttry\n\t\t\t{\n\t\t\t\tvar res = JSON.parse(this.responseText);\n\t\t\t\tif (res && res.hasOwnProperty('__eco_error'))\n\t\t\t\t\tconsole.error(res['__eco_error']);\n\t\t\t\telse\n\t\t\t\t\tcb(res, this.status);\n\t\t\t}\n\t\t\tcatch(e)\n\t\t\t{\n\t\t\t\tconsole.error(e);\n\t\t\t\tconsole.error(this.responseText);\n\t\t\t}\n\t\t}\n\t};\n\n\txhttp.open(\"POST\", ((typeof __eco__inPlugin != 'undefined') && __eco__inPlugin) ? \"../index.php\" : \"index.php\", true);\n\txhttp.setRequestHeader(\"Content-type\", \"application/x-www-form-urlencoded\");\n\txhttp.send(\"__responder=\" + responderType + \"&__method=\" + responderMethod + \"&__args=\" + JSON.stringify(args).replace('&', '%26'));\n}\n");
+		}
+
+	protected:
+		CompilationTarget _target;
+		ImportNode[] _imports;
+
+
+		void CreateStart()
+		{
+			foreach (var imp in _imports)
+			{
+				if (imp.AsNames.Length() > 1)
+				{
+					Write("const { " + imp.AsNames[0]);
+					for (int a = 1; a < imp.AsNames.Length(); a++)
+						Write(", " + imp.AsNames[a]);
+					Write(" } = require(" + imp.ImportFile + ");");
+					NewLine();
+				}
+				else
+					WriteLine("const " + imp.AsNames[0] + " = require(" + imp.ImportFile + ");");
+			}
+			NewLine();
+		}
+
+		void CreateEnd()
+		{
+			if (_target == CompilationTarget.Client)
+			{
+				bool componentFound = false;
+
+				// Initialise components
+				foreach (var symbol in _symbolTable.SymbolArray)
+				{
+					if (symbol.GetSymbolType() == SymbolType.ClientComponent)
+					{
+						var comp = (ClientComponent)symbol;
+						if (comp.PackageID == _packageId)
+						{
+							if (!componentFound)
+							{
+								WriteLine("(function() {");
+								Indent();
+								NewLine();
+								componentFound = true;
+							}
+
+							var qualifiedName = QualifyName(comp.GetSignatureTo(comp.GetRootNamespace()));
+
+							var constr = (Constructor)comp.GetMember("_New()");
+
+							WriteLine("// component " + comp.Name);
+							WriteLine("for (elem of document.querySelectorAll('[data-compclass=\"" + qualifiedName + "\"]'))");
+							WriteLine("{");
+							Indent();
+
+							WriteLine("var inst = new " + qualifiedName + "();");
+							WriteLine("inst.__elem__ = elem;");
+							WriteLine(qualifiedName + "." + constr.CompiledName() + "(inst);");
+
+							Outdent();
+							WriteLine("}");
+							NewLine();
+						}
+
+					}
+				}
+
+				if (componentFound)
+				{
+					Outdent();
+					WriteLine("})();");
+				}
+
+
+				// Init main class
+                var main = SymbolTable.GetSymbolBySignature(_projectName, true);
+                if (main && main.IsNamespace() && ((Namespace)main).IsInterface() && ((Interface)main).IsClass())
+                {
+                    var mainClass = (Class)main;
+
+                    var ctor = mainClass.GetMember("_New()");
+                    if (ctor)
+                    {
+                        Comment("Start by calling default constructor on " + mainClass.Name);
+                        WriteLine(mainClass.FullName + "." + ctor.CompiledName() + "(new " + mainClass.FullName + "());");
+                    }
+                }
+			}
+		}
+
+		void TranslateNamespace(string name, Namespace symbol)
+		{
+			var isTopLevel = (_namespaceDepth == 0);
+
+			Comment("Namespace " + name);
+			WriteLine("if (typeof ${symbol.FullName} == 'undefined') ${symbol.FullName} = {};");
+
+
+			/*_namespaceDepth++;
+			
+			var symbols = symbol.Symbols;
+			Namespace[] namespaces = [];
+			Symbol[] others = [];
+			foreach (var key in symbols.Keys())
+			{
+				if (symbols[key].GetSymbolType() == SymbolType.Namespace)
+					namespaces.Add((Namespace)symbols[key]);
+				else
+					others.Add(symbols[key]);
+			}
+
+			foreach (var ns in namespaces)
+				TranslateNamespace(ns.Name, ns);
+
+			foreach (var other in others)
+				TranslateSymbol(other.Name, other);
+
+			_namespaceDepth--;*/
+
+
+			/*
+			var isTopLevel = (_namespaceDepth == 0);
+
+			Comment("Namespace " + name);
+
+			WriteLine("var ${name};");
+			WriteLine("(function(${name}) {");
+			Indent();
+			NewLine();
+
+			_namespaceDepth++;
+			
+			var symbols = symbol.Symbols;
+			Namespace[] namespaces = [];
+			Symbol[] others = [];
+			foreach (var key in symbols.Keys())
+			{
+				if (symbols[key].GetSymbolType() == SymbolType.Namespace)
+					namespaces.Add((Namespace)symbols[key]);
+				else
+					others.Add(symbols[key]);
+			}
+
+			foreach (var ns in namespaces)
+				TranslateNamespace(ns.Name, ns);
+
+			foreach (var other in others)
+				TranslateSymbol(other.Name, other);
+
+			_namespaceDepth--;
+
+			Outdent();
+
+			if (!isTopLevel)
+			{
+				var ns = symbol.Namespace.Name;
+				WriteLine("})(${name} = ${ns}.${name} || (${ns}.${name} = {}));");
+			}
+			else
+				WriteLine("})(${name} || (${name} = {}));");
+
+			NewLine();*/
+		}
+
+
+		void TranslateClientComponent(string name, ClientComponent symbol)
+		{
+			_inPlugin = (symbol.FileID.Length() > ("plugin").Length()) && (symbol.FileID.SubString(0, ("plugin").Length()) == "plugin");
+
+			var isTopLevel = (_namespaceDepth == 0);
+
+			bool hasBase = symbol.BaseClass != null;
+			string baseName;
+			if (hasBase)
+				baseName = symbol.BaseClass.FullName;
+
+			DocComment(symbol);
+
+			if (hasBase)
+			{
+				WriteLine("var ${symbol.FullName} = (function(_base) {");
+				Indent();
+				WriteLine("__extends(${name}, _base);");
+				NewLine();
+				Outdent();
+			}
+			else
+				WriteLine("var ${symbol.FullName} = (function() {");
+			Indent();
+
+			WriteLine("function ${name}() {");
+
+
+			// Get member types
+			var members = symbol.Members;
+			Constructor[] constructors = [];
+			Field[] fields = [];
+			foreach (var member in members)
+			{
+				if (member.MemberType == MemberType.Constructor)
+					constructors.Add((Constructor)member);
+				else if (member.MemberType == MemberType.Field)
+					fields.Add((Field)member);
+			}
+
+			WriteLine("}");
+			NewLine();
+
+
+			// Static fields. Non-static fields are created in the constructor, which will always exist
+			// even if not exclusively defined by user
+			foreach (var field in fields)
+			{
+				if (field.Static)
+				{
+					if (field.Default)
+					{
+						Write("${name}." + field.Name + " = ", true);
+						TranslateExpression(field.Default);
+						WriteLine(";", false);
+					}
+					else
+						WriteLine("${name}." + field.Name + " = " + GetTypeDefaultLiteral(field.Type) + ";");
+				}
+			}
+
+			// Constructors
+			foreach (var constr in constructors)
+				TranslateConstructor(constr, symbol);
+
+			// Methods
+			foreach (var member in members)
+			{
+				if (member.MemberType == MemberType.Method)
+					TranslateMethod((Method)member, symbol);
+			}
+
+			WriteLine("return ${name};");
+			Outdent();
+
+			if (hasBase)
+				WriteLine("}(${baseName}));");
+			else
+				WriteLine("}());");
+
+			//if (!isTopLevel)
+			//	WriteLine(symbol.Namespace.Name + ".${name} = ${name};");
+
+			NewLine();
+
+			_inPlugin = false;
+		}
+
+
+
+		void TranslateClass(string name, Class symbol)
+		{
+			var isTopLevel = (_namespaceDepth == 0);
+
+			bool hasBase = symbol.BaseClass != null;
+			string baseName;
+			if (hasBase)
+				baseName = symbol.BaseClass.FullName;
+
+			DocComment(symbol);
+
+			if (hasBase)
+			{
+				WriteLine("${symbol.FullName} = (function(_base) {");
+				Indent();
+				WriteLine("__extends(${name}, _base);");
+				NewLine();
+				Outdent();
+			}
+			else
+				WriteLine("${symbol.FullName} = (function() {");
+			Indent();
+
+			WriteLine("function ${name}() {");
+
+
+			// Get member types
+			var members = symbol.Members;
+			Constructor[] constructors = [];
+			Field[] fields = [];
+			foreach (var member in members)
+			{
+				if (member.MemberType == MemberType.Constructor)
+					constructors.Add((Constructor)member);
+				else if (member.MemberType == MemberType.Field)
+					fields.Add((Field)member);
+			}
+
+			WriteLine("}");
+			NewLine();
+
+
+			// Static fields. Non-static fields are created in the constructor, which will always exist
+			// even if not exclusively defined by user
+			foreach (var field in fields)
+			{
+				if (field.Static)
+				{
+					if (field.Default)
+					{
+						Write("${name}." + field.Name + " = ", true);
+						TranslateExpression(field.Default);
+						WriteLine(";", false);
+					}
+					else
+						WriteLine("${name}." + field.Name + " = " + GetTypeDefaultLiteral(field.Type) + ";");
+				}
+			}
+
+			// Constructors
+			foreach (var constr in constructors)
+				TranslateConstructor(constr, symbol);
+
+			// Methods
+			foreach (var member in members)
+			{
+				if (member.MemberType == MemberType.Method)
+					TranslateMethod((Method)member, symbol);
+			}
+
+			WriteLine("return ${name};");
+			Outdent();
+
+			if (hasBase)
+				WriteLine("}(${baseName}));");
+			else
+				WriteLine("}());");
+
+			//if (!isTopLevel)
+			//	WriteLine(symbol.Namespace.Name + ".${name} = ${name};");
+
+			NewLine();
+		}
+
+
+		void TranslateTemplate(string name, Template symbol)
+		{
+			var isTopLevel = (_namespaceDepth == 0);
+
+			//WriteLine("var " + symbol.CompiledName() + " = function(attr, children) {");
+			WriteLine(symbol.FullName + " = function(attr, children) {");
+
+			var method = (Method)symbol.Members[0];
+
+			_scope = new Scope(method);
+
+			Indent();
+			int paramCount = 0;
+			var mergeString = "";
+			foreach (var param in symbol.Parameters)
+				mergeString += ((paramCount++ > 0) ? ", " : "") + param.Name + ": " + (string)param.Default;
+
+			WriteLine("attr = map_Merge(attr, {${mergeString}});");
+
+			foreach (var param in symbol.Parameters)
+			{
+				var scopeItem = _scope.AddItem(param.Type, param.Name);
+				WriteLine("var " + scopeItem.CompiledName() + " = attr[\"" + param.Name + "\"];");
+			}
+
+			var statements = method.Block.Statements;
+			foreach (var statement in statements)
+				TranslateStatement(statement);
+
+			Outdent();
+
+			_scope = null;
+
+			WriteLine("};");
+
+			//if (!isTopLevel)
+			//	WriteLine(symbol.Namespace.Name + ".${name} = ${name};");
+
+
+			NewLine();
+		}
+
+		void TranslateNativeClass(string name, Class symbol)
+		{
+			PushStack();
+
+			name = symbol.CompiledName();
+
+			if (symbol.Members.Length() > 0)
+				Comment("Class " + name);
+
+			// Translate methods
+			foreach (var member in symbol.Members)
+			{
+				var method = (Method)member;
+				_scope = new Scope(method);
+
+				if (method.InlineJS == "")
+				{
+					Write("function " + symbol.CompiledName() + "_" + method.CompiledName() + "(self");
+
+					var params = method.Parameters;
+					foreach (var param in params)
+					{
+						var scopeItem = _scope.GetItem(param.Name);
+
+						Write(", " + scopeItem.CompiledName());
+					}
+
+					WriteLine(") {", false);
+					Indent();
+
+					var block = method.Block;
+					if (block)
+					{
+						foreach (var stmt in block.Statements)
+							TranslateStatement(stmt);
+					}
+
+					Outdent();
+					WriteLine("}");
+					NewLine();
+
+				}
+
+				_scope = null;
+			}
+
+			AddCommonCode(PopStack());
+		}
+
+
+		void TranslateEnum(string name, Enum enm)
+		{
+			WriteLine(enm.FullName + " = {");
+			Indent();
+
+			int count = 0;
+			foreach (var key in enm.KVPairs.Keys())
+			{
+				WriteLine(key + ": " + enm.KVPairs[key] + (count < (enm.KVPairs.Keys().Length() - 1) ? "," : ""));
+				count++;
+			}
+
+			Outdent();
+			WriteLine("};");
+		}
+
+
+		void TranslateConstructor(Constructor constr, Class cls)
+		{
+			_scope = new Scope(constr);
+			AddScope();
+
+			DocComment(constr);
+
+			Write(cls.Name + "." + constr.CompiledName() + " = function(self", true);
+
+			var params = constr.Parameters;
+			foreach (var param in params)
+			{
+				// We only need to get the item because the Scope() constructor adds parameters for us
+				var scopeItem = _scope.GetItem(param.Name);
+				Write(", " + scopeItem.CompiledName());
+			}
+
+			WriteLine(") {", false);
+			Indent();
+
+
+			// Call base constructor
+			if (cls.BaseClass)
+			{
+				// If we have a base call, call that one, otherwise call base class's default constructor
+				if (constr.BaseCall)
+				{
+					var foundConstr = cls.BaseClass.GetMethod(constr.BaseCall, _scope, null);
+					if (foundConstr)
+					{
+						Write("self = _base." + foundConstr.CompiledName(), true);
+						TranslateArgListWithSelf(constr.BaseCall.ArgList, foundConstr);
+						WriteLine(" || self;", false);
+					}
+				}
+				else
+					WriteLine("self = _base." + cls.BaseClass.BasicConstructor().CompiledName() + "(self) || self;");
+			}
+
+
+			// Initialise fields
+			var members = cls.Members;
+			foreach (var member in members)
+			{
+				if (member.MemberType == MemberType.Field && !member.Static)
+				{
+					var field = (Field)member;
+
+					/*var assign = GetTypeDefaultLiteral(field.Type);
+					if (field.Default)
+						assign = "" + (string)field.Default;
+
+					WriteLine("self." + field.Name + " = " + assign + ";");*/
+
+					if (field.Default)
+					{
+						Write("self." + field.Name + " = ", true);
+						TranslateExpression(field.Default);
+						WriteLine(";", false);
+					}
+					else
+						WriteLine("self." + field.Name + " = " + GetTypeDefaultLiteral(field.Type) + ";");
+				}
+			}
+
+
+			// Block
+			if (constr.Block)
+			{
+				var statements = constr.Block.Statements;
+				foreach (var statement in statements)
+					TranslateStatement(statement);
+			}
+
+			WriteLine("return self;");
+			Outdent();
+			WriteLine("};");
+
+			NewLine();
+
+			PopScope();
+			_scope = null;
+		}
+
+
+		void TranslateMethod(Method method, Class cls)
+		{
+			_scope = new Scope(method);
+			AddScope();
+
+			bool isStatic = method.Static;
+
+			DocComment(method);
+
+			Write(cls.Name + (isStatic ? "" : ".prototype") + "." + method.CompiledName() + " = function(", true);
+			int count = 0;
+			var params = method.Parameters;
+			foreach (var param in params)
+			{
+				// We only need to get the item because the Scope() constructor adds parameters for us
+				var scopeItem = _scope.GetItem(param.Name);
+
+				if (count > 0) Write(", ");
+				Write(scopeItem.CompiledName());
+				count++;
+			}
+			WriteLine(") {", false);
+			Indent();
+
+			if (!isStatic)
+				WriteLine("var self = this;");
+
+			// Block
+			if (method.Block)
+			{
+				var statements = method.Block.Statements;
+				foreach (var statement in statements)
+					TranslateStatement(statement);
+			}
+
+			Outdent();
+			WriteLine("};");
+			NewLine();
+
+			PopScope();
+			_scope = null;
+
+
+			// Implement interface
+			/*if (method.Implementing)
+			{
+				var implementing = method.Implementing;
+
+				Comment("Implement " + implementing.Signature());
+				WriteLine(cls.Name + (isStatic ? "" : ".prototype") + "." + QualifyName(implementing.Owner.GetSignatureTo(implementing.Owner.GetRootNamespace())) + "__" + implementing.CompiledName() + " = " + cls.Name + (isStatic ? "" : ".prototype") + "." + method.CompiledName() + ";");
+				NewLine();
+			}*/
+		}
+
+		string GetTypeDefaultLiteral(Interface type)
+		{
+			if (type.IsEvent())
+				return "[]";
+
+			if (!type.IsBasic())
+				return "null";
+
+			switch (type.Name)
+			{
+				case "bool":	return "false";
+				case "char":	return "\"\"";
+				case "int":		return "0";
+				case "float":	return "0.0";
+				case "string": 	return "\"\"";
+
+			}
+
+			return "null";
+		}
+
+
+		void TranslateStatement(StatementNode stmt, bool indentIf = true)
+		{
+			switch (stmt.StmtType)
+			{
+				case StatementType.Block:		TranslateBlock((BlockNode)stmt);			break;
+				case StatementType.VarDecl:		TranslateVarDecl((VarDeclNode)stmt);		break;
+				case StatementType.Return:
+				{
+					var ret = (ReturnNode)stmt;
+					Write("return", true);
+					if (ret.ReturnValue)
+					{
+						Write(" ");
+						TranslateExpression(ret.ReturnValue);
+					}
+
+					Write(";");
+					NewLine();
+					break;
+				}
+
+				case StatementType.If:
+				{
+					var ifStatement = (IfNode)stmt;
+
+					Write("if (", indentIf);
+					TranslateExpression(ifStatement.Condition);
+					WriteLine(")", false);
+
+					if (ifStatement.Then.StmtType == StatementType.Block)
+						TranslateStatement(ifStatement.Then);
+					else
+					{
+						Indent();
+						TranslateStatement(ifStatement.Then);
+						Outdent();
+					}
+
+					if (ifStatement.Else)
+					{
+
+						// If 'else-if'
+						if (ifStatement.Else.StmtType == StatementType.If)
+						{
+							Write("else ", true);
+							TranslateStatement(ifStatement.Else, false);
+						}
+						else
+						{
+							WriteLine("else");
+
+							if (ifStatement.Else.StmtType == StatementType.Block)
+								TranslateStatement(ifStatement.Else);
+							else
+							{
+								Indent();
+								TranslateStatement(ifStatement.Else);
+								Outdent();
+							}
+
+							NewLine();
+						}
+
+
+					}
+
+					break;
+				}
+
+				case StatementType.While:
+				{
+					var whileLoop = (WhileNode)stmt;
+
+					Write("while (", true);
+					TranslateExpression(whileLoop.Condition);
+					WriteLine(")", false);
+
+					_loopDepth++;
+					if (whileLoop.Statement.StmtType == StatementType.Block)
+						TranslateStatement(whileLoop.Statement);
+					else
+					{
+						Indent();
+						TranslateStatement(whileLoop.Statement);
+						Outdent();
+					}
+					_loopDepth--;
+
+					NewLine();
+
+					break;
+				}
+
+				case StatementType.For:
+				{
+					var forLoop = (ForNode)stmt;
+
+					Write("for (", true);
+					var shouldIndent = _shouldIndent;
+					var shouldNewLine = _shouldNewLine;
+					_shouldIndent = false;
+					_shouldNewLine = false;
+					TranslateStatement(forLoop.Init);
+					_shouldIndent = shouldIndent;
+					_shouldNewLine = shouldNewLine;
+					Write(" ");
+					TranslateExpression(forLoop.Condition);
+					Write("; ");
+					TranslateExpression(forLoop.Update);
+					Write(")");
+					NewLine();
+
+					_loopDepth++;
+					if (forLoop.Statement.StmtType == StatementType.Block)
+						TranslateStatement(forLoop.Statement);
+					else
+					{
+						Indent();
+						TranslateStatement(forLoop.Statement);
+						Outdent();
+					}
+					_loopDepth--;
+
+					NewLine();
+
+
+					break;
+				}
+
+
+				case StatementType.Foreach:
+				{
+					var forLoop = (ForeachNode)stmt;
+
+					AddScope();
+
+					var collectionType = forLoop.Collection.GetTypeOf(_scope);
+
+					// One iterator
+					if (!forLoop.IteratorType2)
+					{
+						Interface iterType = null;
+						if (forLoop.IteratorType == TypeNode.VarType)
+						{
+							if (collectionType.IsArray())
+								iterType = ((ArrayType)collectionType).Elem;
+							else if (collectionType.IsMap())
+								iterType = ((MapType)collectionType).Elem;
+							else if (collectionType == Interface.ObjectType)
+								iterType = Interface.ObjectType;
+						}
+						else
+							iterType = _scope.OwnerMethod.Owner.GetType(forLoop.IteratorType);
+
+						var iterItem = _scope.AddItem(iterType, forLoop.IteratorName);
+
+						Write("for (var " + iterItem.CompiledName() + " of ", true);
+						TranslateExpression(forLoop.Collection);
+						WriteLine(")", false);
+
+						// Write loop statement
+						_loopDepth++;
+						if (forLoop.Statement.StmtType == StatementType.Block)
+							TranslateStatement(forLoop.Statement);
+						else
+						{
+							Indent();
+							TranslateStatement(forLoop.Statement);
+							Outdent();
+						}
+						_loopDepth--;
+
+						NewLine();
+
+					}
+
+					// Key/value iterator
+					else
+					{
+						Interface iterType = Interface.StringType;
+
+						Interface iterType2 = null;
+						if (forLoop.IteratorType2 == TypeNode.VarType)
+						{
+							if (collectionType.IsMap())
+								iterType2 = ((MapType)collectionType).Elem;
+							else if (collectionType == Interface.ObjectType)
+								iterType2 = Interface.ObjectType;
+						}
+						else
+							iterType2 = _scope.OwnerMethod.Owner.GetType(forLoop.IteratorType2);
+
+						var collectionItem = _scope.AddItem(collectionType, "_collection");
+
+						var iterItem = _scope.AddItem(iterType, forLoop.IteratorName);
+						var iterItem2 = _scope.AddItem(iterType2, forLoop.IteratorName2);
+
+
+						// Create collection
+						Write("var " + collectionItem.CompiledName() + " = ", true);
+						TranslateExpression(forLoop.Collection);
+						WriteLine(";", false);
+
+						// Start for loop
+						WriteLine("for (var " + iterItem.CompiledName() + " in " + collectionItem.CompiledName() + ")");
+						WriteLine("{");
+						Indent();
+
+						WriteLine("var " + iterItem2.CompiledName() + " = " + collectionItem.CompiledName() + "[" + iterItem.CompiledName() + "];");
+
+						// Write loop statement
+						_loopDepth++;
+						if (forLoop.Statement.StmtType == StatementType.Block)
+						{
+							var stmts = ((BlockNode)forLoop.Statement).Statements;
+							foreach (var stmt in stmts)
+								TranslateStatement(stmt);
+						}
+						else
+							TranslateStatement(forLoop.Statement);
+						_loopDepth--;
+
+						Outdent();
+						WriteLine("}");
+						NewLine();
+
+					}
+
+					PopScope();
+
+					break;
+				}
+
+
+				case StatementType.Break:
+				{
+					WriteLine("break;");
+					break;
+				}
+
+				case StatementType.Continue:
+				{
+					WriteLine("continue;");
+					break;
+				}
+
+				case StatementType.Assembly:
+				{
+					var assemblyNode = (AssemblyNode)stmt;
+
+					if (assemblyNode.Targets.Length() == 0 || assemblyNode.HasTarget("JS"))
+					{
+						ScopeItem[] items = [];
+						_scope.GetAllItems(items);
+
+						Write("with({", true);
+
+						int count = 0;
+						foreach (var item in items)
+						{
+							if (count > 0) Write(", ");
+							Write(item.Name + ": " + item.CompiledName());
+
+							count++;
+						}
+
+						WriteLine("})", false);
+						WriteLine("{");
+						Indent();
+						WriteLine(assemblyNode.Code);
+						Outdent();
+						WriteLine("}");
+					}
+
+					break;
+				}
+
+
+				case StatementType.Target:
+				{
+					var targetNode = (TargetNode)stmt;
+
+					if (targetNode.HasTarget("JS"))
+					{
+						var stmts = targetNode.Block.Statements;
+						foreach (var stmt in stmts)
+							TranslateStatement(stmt);
+					}
+
+					break;
+				}
+
+
+				case StatementType.TryCatch:
+				{
+					var tryCatchNode = (TryCatchNode)stmt;
+
+					WriteLine("try");
+					TranslateBlock(tryCatchNode.TryBlock);
+					WriteLine("catch (" + tryCatchNode.CatchName + ")");
+					AddScope();
+					_scope.AddItem(_scope.OwnerMethod.Owner.GetType(tryCatchNode.CatchType), tryCatchNode.CatchName);
+					TranslateBlock(tryCatchNode.CatchBlock);
+
+					PopScope();
+
+					break;
+				}
+
+
+				case StatementType.Throw:
+				{
+					var throwNode = (ThrowNode)stmt;
+					Write("throw ", true);
+					TranslateExpression(throwNode.Expression);
+					WriteLine(";", false);
+
+					break;
+				}
+
+
+				case StatementType.Switch:
+				{
+					var switchNode = (SwitchCaseNode)stmt;
+
+					Write("switch (", true);
+					TranslateExpression(switchNode.Value);
+					WriteLine(")", false);
+					WriteLine("{");
+					Indent();
+					AddScope();
+
+					foreach (var caseNode in switchNode.Cases)
+					{
+						Write("case ", true);
+						TranslateExpression(caseNode.Value);
+						WriteLine(":", false);
+
+						foreach (var caseStmt in caseNode.Statements)
+						{
+							if (caseStmt.StmtType != StatementType.Block)
+								Indent();
+
+							TranslateStatement(caseStmt);
+
+							if (caseStmt.StmtType != StatementType.Block)
+								Outdent();
+						}
+					}
+
+					if (switchNode.DefaultCase)
+					{
+						WriteLine("default:");
+
+						foreach (var defaultStmt in switchNode.DefaultCase.Statements)
+						{
+							if (defaultStmt.StmtType != StatementType.Block)
+								Indent();
+
+							TranslateStatement(defaultStmt);
+
+							if (defaultStmt.StmtType != StatementType.Block)
+								Outdent();
+						}
+					}
+
+					PopScope();
+					Outdent();
+					WriteLine("}");
+
+					break;
+				}
+
+
+				case StatementType.Await:
+				{
+					var awaitNode = (AwaitNode)stmt;
+
+					var responderTypeNode = awaitNode.Responder.Parent;
+					var responderName = awaitNode.Responder.Name;
+
+					var responderType = _serverSymbolTable.GetType(responderTypeNode);
+					var callNode = new CallExpressionNode(responderName);
+					foreach (var arg in awaitNode.ArgList)
+						callNode.ArgList.Add(arg);
+
+					var responderMethod = responderType.GetMethod(callNode, _scope, null);
+
+					Write("__performAwait(\"" + QualifyName(responderType.FullName) + "\", \"" + responderMethod.CompiledName() + "\", [", true);
+					
+					int count = 0;
+					foreach (var arg in awaitNode.ArgList)
+					{
+						if (count > 0) Write(", ");
+						TranslateExpression(arg);
+						count++;
+					}
+					Write("], function(");
+
+					var statusVarName = "status";
+					if (awaitNode.StatusVarName != "")
+						statusVarName = awaitNode.StatusVarName;
+
+					var resultType = _scope.OwnerMethod.Owner.GetType(awaitNode.ResultType);
+					var scopeResult = _scope.AddItem(resultType, awaitNode.ResultVarName);
+					var scopeStatus = _scope.AddItem(Interface.IntType, statusVarName);
+
+					Write(scopeResult.CompiledName() + ", " + scopeStatus.CompiledName());
+
+					WriteLine(") {", false);
+					Indent();
+					AddScope();
+					
+					var statements = awaitNode.Block.Statements;
+					foreach (var statement in statements)
+						TranslateStatement(statement);
+
+					PopScope();
+					Outdent();
+					//WriteLine("}, " + (_inPlugin ? "true" : "false") + ");");
+					WriteLine("});");
+					NewLine();
+
+					break;
+				}
+
+
+				case StatementType.Expression:
+				{
+					Write("", true);
+					TranslateExpression((ExpressionNode)stmt);
+					Write(";");
+					NewLine();
+					break;
+				}
+			}
+		}
+
+
+		void TranslateBlock(BlockNode block)
+		{
+			WriteLine("{");
+			Indent();
+			AddScope();
+
+			var statements = block.Statements;
+			foreach (var statement in statements)
+				TranslateStatement(statement);
+
+			PopScope();
+			Outdent();
+			WriteLine("}");
+		}
+
+		void TranslateVarDecl(VarDeclNode varDecl)
+		{
+			Interface intr;
+			var varType = varDecl.VarType;
+			if (varType == TypeNode.VarType)
+				intr = varDecl.Expr.GetTypeOf(_scope);
+			else
+				intr = _scope.OwnerMethod.Owner.GetType(varDecl.VarType);
+
+			var item = _scope.AddItem(intr, varDecl.Name);
+			item.Visible = false;
+
+			Write("var " + item.CompiledName(), true);
+
+			if (varDecl.Expr)
+			{
+				Write(" = ");
+				TranslateExpression(varDecl.Expr);
+				Write(";");
+			}
+			else
+				Write(" = " + GetTypeDefaultLiteral(intr) +  ";");
+			NewLine();
+
+			item.Visible = true;
+		}
+
+
+		void TranslateExpression(ExpressionNode expr)
+		{
+			if (DebugMode && _expressionLocations && expr.StartLine > 1)
+			{
+				if (_expressionLocations.HasKey(_currentFileID + ":" + expr.StartLine))
+				{
+					//_expressionMappings["" + expr.StartLine].mapsTo = _currentLine;
+
+					_expressionMappings["" + _currentLine] = {
+						line: expr.StartLine,
+						column: expr.StartColumn,
+						file: _currentFileID //_expressionLocations[_currentFileID + ":" + expr.StartLine].file
+					};
+				}
+			}
+
+			switch (expr.ExprType)
+			{
+				case ExpressionType.None:	break;
+
+				// Literal
+				case ExpressionType.Lit:	Write((string)((LitExpressionNode)expr).Literal.Value);	break;
+
+				// Load
+				case ExpressionType.Load:
+				{
+					var load = (LoadExpressionNode)expr;
+
+					if (load.IsNative)
+						Write(load.VarName);
+					else
+					{
+						// Check if local
+						var scopeItem = _scope.GetItem(load.VarName);
+						if (scopeItem)
+						{
+							CurrentCaptureList().AddItem(scopeItem);
+							Write( scopeItem.CompiledName() );
+						}
+
+						// Else check if field or property
+						else
+						{
+							var cls = (Class)_scope.OwnerMethod.Owner;
+							var found = cls.GetMember(load.VarName);
+							if (found)
+							{
+								if (found.MemberType == MemberType.Field)
+								{
+									var field = (Field)found;
+
+									if (field.Static)
+										Write(_scope.OwnerMethod.Owner.Name + "." + field.Name);
+									else
+										Write("self." + found.Name);
+								}
+								else if (found.MemberType == MemberType.Property)
+								{
+									var property = (Property)found;
+									if (property.Static)
+										Write(_scope.OwnerMethod.Owner.Name + ".get" + found.CompiledName() + "()");
+									else
+										Write("self.get" + found.CompiledName() + "()");
+								}
+							}
+						}
+					}
+
+					break;
+				}
+
+				// Access expression
+				case ExpressionType.Access:
+				{
+					var access = (AccessExpressionNode)expr;
+
+					var intr = access.Expression.GetTypeOf(_scope);
+
+					if (intr == Interface.ObjectType)
+					{
+						TranslateExpression(access.Expression);
+						Write(".");
+						Write(access.Field);
+						return;
+					}
+					else if (intr && intr.IsMap())
+					{
+						TranslateExpression(access.Expression);
+						Write("[\"");
+						Write(access.Field);
+						Write("\"]");
+						return;
+					}
+
+					if (intr && intr != Interface.NullType && intr.GetSymbolType() != SymbolType.Enum)
+						TranslateExpression(access.Expression);
+					else
+					{
+						if (!intr || intr == Interface.NullType)
+							intr = access.Expression.TryGetType(_scope);
+
+						if (intr.GetSymbolType() == SymbolType.Enum)
+						{
+							var enm = (Enum)intr;
+							Write(enm.GetSignatureTo(enm.GetRootNamespace()) + "." + access.Field);
+							return;
+						}
+						else
+							Write(intr.GetSignatureTo(intr.GetRootNamespace()));
+					}
+
+					var found = intr.GetMember(access.Field);
+					if (found)
+					{
+						if (found.MemberType == MemberType.Field)
+						{
+							Write(".");
+							Write(access.Field);
+						}
+						else if (found.MemberType == MemberType.Property)
+						{
+							// Optimisation: If the getter is only a return statement with a load, inject it directly
+							var getter = (Method)intr.GetMember("get" + found.CompiledName() + "()");
+							bool isSimpleReturn = false;
+							if (getter.Block)
+							{
+								var statements = getter.Block.Statements;
+
+								bool isOnlyReturn = statements.Length() == 1 && statements[0].StmtType == StatementType.Return;
+								if (isOnlyReturn)
+								{
+									var returnStatement = (ReturnNode)statements[0];
+									var returnValue = returnStatement.ReturnValue;
+
+									if (returnValue.ExprType == ExpressionType.Load)
+									{
+										isSimpleReturn = true;
+										Write("." + ((LoadExpressionNode)returnValue).VarName);
+									}
+
+								}	
+							}						
+
+							if (!isSimpleReturn)
+								Write(".get" + found.CompiledName() + "()");
+						}
+					}
+
+					break;
+				}
+
+				// Array access expression
+				case ExpressionType.ArrayAccess:
+				{
+					var access = (ArrayAccessExpressionNode)expr;
+
+					var intr = access.Expr.GetTypeOf(_scope);
+					if (intr && (intr.IsArray() || intr.IsMap() || intr == Interface.StringType || intr == Interface.ObjectType))
+					{
+						TranslateExpression(access.Expr);
+						Write("[");
+						TranslateExpression(access.Index);
+						Write("]");
+					}
+
+					break;
+				}
+
+				// New expression
+				case ExpressionType.New:
+				{
+					var newNode = (NewExpressionNode)expr;
+
+					if (newNode.IsNative)
+					{
+						Write("new " + newNode.NewType.FullName);
+						TranslateArgList(newNode.ArgList);
+					}
+					else
+					{
+						var type = (Interface)_scope.OwnerMethod.Owner.GetType(newNode.NewType);
+
+						if (type.IsArray())
+						{
+							Write("[]");
+							return;
+						}
+						else if (type.IsMap())
+						{
+							Write("{}");
+							return;
+						}
+
+						var cls = (Class)type;
+
+						var call = new CallExpressionNode("_New");
+						call.ArgList = newNode.ArgList;
+
+
+						var found = cls.GetMethod(call, _scope, null);
+
+						var signature = cls.GetSignatureTo(cls.GetRootNamespace());
+						Write(signature + "." + found.CompiledName());
+						Write("(new " + signature + "()");
+
+						var args = call.ArgList;
+						if (args.Length() > 0)
+						{
+							foreach (var arg in args)
+							{
+								Write(", ");
+								TranslateExpression(arg);
+							}
+
+							if (args.Length() < found.Parameters.Length())
+							{
+								for (int a = args.Length(); a < found.Parameters.Length(); a++)
+								{
+									Write(", ");
+									Write((string)found.Parameters[a].Default);
+								}
+							}
+						}
+
+						Write(")");
+					}
+
+					break;
+				}
+
+
+				// Call expression
+				case ExpressionType.Call:
+				{
+					var call = (CallExpressionNode)expr;
+
+					var found = _scope.OwnerMethod.Owner.GetMethod(call, _scope, null);
+
+					// Method not found. Maybe a native, local function or field function
+					if (!found)
+					{
+						if (call.IsNative)
+							Write(call.Name);
+						else
+						{
+							var scopeItem = _scope.GetItem(call.Name);
+
+							if (scopeItem)
+								Write(scopeItem.CompiledName());
+							else
+							{
+								// Might be a field in this class
+								var member = _scope.OwnerMethod.Owner.GetMember(call.Name);
+								if (member && member.MemberType == MemberType.Field)
+								{
+									if (member.Static)
+										Write(_scope.OwnerMethod.Owner.Name + "." + member.Name);
+									else
+										Write("self." + member.Name);
+								}
+							}
+						}
+
+						Write("(");
+
+						var args = call.ArgList;
+
+						if (args.Length() > 0)
+						{
+							TranslateExpression(args[0]);
+
+							for (int a = 1; a < args.Length(); a++)
+							{
+								Write(", ");
+								TranslateExpression(args[a]);
+							}
+						}
+
+						Write(")");
+
+						return;
+					}
+
+					if (found.Static)
+						Write(_scope.OwnerMethod.Owner.Name);
+					else
+						Write("self");
+
+					Write("." + found.CompiledName());
+					TranslateArgList(call.ArgList, found);
+
+					break;
+				}
+
+
+				// Method call
+				case ExpressionType.MethodCall:
+				{
+					var call = (MethodCallExpressionNode)expr;
+					var intr = call.Expr.GetTypeOf(_scope);
+					if (intr)
+					{
+						if (intr == Interface.ObjectType)
+						{
+							var method = intr.GetMethod(call.Call, _scope, null);
+							if (method)
+							{
+								PushStack();
+								TranslateExpression(call.Expr);
+								var exprTrans = PopStack();
+
+								//var put = (object)method.InlineJS;
+								//put = put.replace("$t", exprTrans);
+								var put = method.InlineJS.Split("$t").Join(exprTrans);
+
+								int count = 1;
+								foreach (var arg in call.Call.ArgList)
+								{
+									PushStack();
+									TranslateExpression(arg);
+									var argTrans = PopStack();
+									//put = put.replace("$" + count, argTrans);
+									put = put.Split("$" + count).Join(argTrans);
+									count++;
+								}
+
+								Write((string)put);
+							}
+							else
+							{
+								TranslateExpression(call.Expr);
+								Write(".");
+								Write(call.Call.Name);
+								TranslateArgList(call.Call.ArgList);
+							}
+						}
+						else
+						{
+							var method = intr.GetMethod(call.Call, _scope, null);
+							if (method)
+							{
+								if (intr.IsClass() && ((Class)intr).IsNative)
+								{
+									if (method.InlineJS == "")
+									{
+										Write(intr.CompiledName() + "_" + method.CompiledName() + "(");
+										TranslateExpression(call.Expr);
+
+										var args = call.Call.ArgList;
+										foreach (var arg in args)
+										{
+											Write(", ");
+											TranslateExpression(arg);
+										}
+										Write(")");
+									}
+									else
+									{
+										PushStack();
+										TranslateExpression(call.Expr);
+										var exprTrans = PopStack();
+
+										//var put = (object)method.InlineJS;
+										//put = put.replace("$t", exprTrans);
+										var put = method.InlineJS.Split("$t").Join(exprTrans);
+
+										int count = 1;
+										foreach (var arg in call.Call.ArgList)
+										{
+											PushStack();
+											TranslateExpression(arg);
+											var argTrans = PopStack();
+											//put = put.replace("$" + count, argTrans);
+											put = put.Split("$" + count).Join(argTrans);
+											count++;
+										}
+
+										Write((string)put);
+									}
+								}
+								else if (!intr.IsClass())
+								{
+									if (intr.IsInline() || intr.IsDefined)
+									{
+										TranslateExpression(call.Expr);
+										Write(".");
+										Write(method.Name);
+										TranslateArgList(call.Call.ArgList, method);
+									}
+								}
+								else
+								{
+									TranslateExpression(call.Expr);
+									Write(".");
+									Write(method.CompiledName());
+									TranslateArgList(call.Call.ArgList, method);
+								}
+							}
+
+							// Probably a field function
+							else
+							{
+								TranslateExpression(call.Expr);
+								Write(".");
+								Write(call.Call.Name);
+								TranslateArgList(call.Call.ArgList);
+							}
+						}
+
+					}
+
+					// Type of expression can't be found. Probably a static call
+					else
+					{
+						intr = call.Expr.TryGetType(_scope);
+						Write(intr.GetSignatureTo(intr.GetRootNamespace()) + ".");
+
+						var found = intr.GetMethod(call.Call, _scope, null);
+
+						if (found)
+						{
+							Write(found.CompiledName());
+							TranslateArgList(call.Call.ArgList, found);
+						}
+
+						// Not found. Must be a field function
+						else
+						{
+							Write(call.Call.Name);
+							TranslateArgList(call.Call.ArgList, null);
+						}
+					}
+
+					break;
+				}
+
+
+
+				// Complex call, e.g. foo[0](1, 2, 3)
+				case ExpressionType.ComplexCall:
+				{
+					var complex = (ComplexCallExpressionNode)expr;
+
+					TranslateExpression(complex.Object);
+					Write("(");
+
+					var args = complex.ArgList;
+					if (args.Length() > 0)
+					{
+						TranslateExpression(args[0]);
+
+						for (int a = 1; a < args.Length(); a++)
+						{
+							Write(", ");
+							TranslateExpression(args[a]);
+						}
+					}
+
+					Write(")");
+
+					break;
+				}
+
+
+				// Base call
+				case ExpressionType.BaseCall:
+				{
+					var baseCall = (BaseCallExpressionNode)expr;
+
+					var baseClass = ((Class)_scope.OwnerMethod.Owner).BaseClass;
+					var found = baseClass.GetMethod(baseCall, _scope, null);
+
+					Write("_base.prototype." + found.CompiledName() + ".call");
+					TranslateArgListWithSelf(baseCall.ArgList, found);
+
+					break;
+				}
+
+
+				// Function
+				case ExpressionType.Function:
+				{
+					var func = (FunctionExpressionNode)expr;
+
+					var translateFunction = function() {
+						AddScope();
+						
+						Write("function (");
+
+						int count = 0;
+						foreach (var param in func.Params)
+						{
+							var type = _scope.OwnerMethod.Owner.GetType((TypeNode)param.type);
+							var scopeItem = _scope.AddItem(type, (string)param.name);
+
+							if (count > 0) Write(", ");
+							Write(scopeItem.CompiledName());
+							count++;
+						}
+
+						WriteLine(") {", false);
+
+						Indent();
+
+						var block = func.Block;
+						foreach (var stmt in block.Statements)
+							TranslateStatement(stmt);
+
+						Outdent();
+
+						Write("}", true);
+
+						PopScope();
+					};
+
+					if (_loopDepth > 0)
+					{
+						int scopeSize = _scope.Size;
+
+						PushCaptureList();
+						PushStack();
+
+						translateFunction();
+
+						var funcContents = PopStack();
+						var captured = PopCaptureList().Items;
+
+						// Get captured local variables
+						ScopeItem[] external = [];
+						foreach (var c in captured)
+						{
+							if (c.Index <= scopeSize)
+								external.Add(c);
+						}
+
+						var capturedList = "";
+						int count = 0;
+						foreach (var e in external)
+						{
+							if (count > 0) capturedList += ", ";
+							capturedList += e.CompiledName();
+							count++;
+						}
+
+
+						WriteLine("(function(" + capturedList + ") {", false);
+						Indent();
+						Write("return ", true);
+						Indent();
+						Write(funcContents);
+						Write(";");
+						NewLine();
+						Outdent();
+						Outdent();
+						Write("})(" + capturedList + ")", true);
+					}
+					else
+					{
+						translateFunction();
+					}
+
+					break;
+				}
+
+
+				// Parenthesis
+				case ExpressionType.Par:
+				{
+					Write("(");
+					TranslateExpression( ((ParExpressionNode)expr).SubExpr );
+					Write(")");
+
+					break;
+				}
+
+
+				// Operator
+				case ExpressionType.Op:
+				{
+					var opExpr = (OperatorExpressionNode)expr;
+
+					switch (opExpr.Operator)
+					{
+						case OpType.Assign:
+						{
+							TranslateStore(opExpr.Expression1, opExpr.Expression2);
+							break;
+						}
+
+						case OpType.AAdd:
+						case OpType.ASub:
+						case OpType.AMul:
+						case OpType.ADiv:
+						case OpType.AExp:
+						case OpType.AMod:
+						{
+							var opType = OpType.Add;
+							switch (opExpr.Operator)
+							{
+								case OpType.AAdd:	opType = OpType.Add;	break;
+								case OpType.ASub:	opType = OpType.Sub;	break;
+								case OpType.AMul:	opType = OpType.Mult;	break;
+								case OpType.ADiv:	opType = OpType.Div;	break;
+								case OpType.AExp:	opType = OpType.Exp;	break;
+								case OpType.AMod:	opType = OpType.Mod;	break;
+								default: break;
+							}
+
+							var newOpNode = new OperatorExpressionNode(opType);
+							newOpNode.Expression1 = opExpr.Expression1;
+							newOpNode.Expression2 = opExpr.Expression2;
+
+							TranslateStore(opExpr.Expression1, newOpNode);
+
+							break;
+						}
+
+						default:
+						{
+							TranslateExpression(opExpr.Expression1);
+
+							Write(" ");
+							Write(TokenOp.GetOpName(opExpr.Operator));
+							Write(" ");
+
+							TranslateExpression(opExpr.Expression2);
+
+							break;
+						}
+					}
+
+					break;
+				}
+
+				// Prefix operator
+				case ExpressionType.PreOp:
+				{
+					var op = (PreOpExpressionNode)expr;
+
+					Write(TokenOp.GetOpName(op.Operator));
+					TranslateExpression(op.Expression);
+
+					break;
+				}
+
+
+				// Postfix operator
+				case ExpressionType.PostOp:
+				{
+					var op = (PostOpExpressionNode)expr;
+
+					TranslateExpression(op.Expression);
+					Write(TokenOp.GetOpName(op.Operator));
+
+					break;
+				}
+
+
+				// Conditional operator
+				case ExpressionType.CondOp:
+				{
+					var cond = (CondOpExpressionNode)expr;
+
+					TranslateExpression(cond.Expression1);
+					Write(" ? ");
+					TranslateExpression(cond.Expression2);
+					Write(" : ");
+					TranslateExpression(cond.Expression3);
+
+					break;
+				}
+
+
+				// Literal array
+				case ExpressionType.LitArray:
+				{
+					var litArray = (LitArrayExpressionNode)expr;
+					Write("[");
+
+					var items = litArray.Items;
+					if (items.Length() > 0)
+					{
+						TranslateExpression(items[0]);
+
+						for (int i = 1; i < items.Length(); i++)
+						{
+							Write(", ");
+							TranslateExpression(items[i]);
+						}
+					}
+
+					Write("]");
+
+					break;
+				}
+
+
+				// Literal map
+				case ExpressionType.Map:
+				{
+					var litMap = (LitMapExpressionNode)expr;
+					Write("{");
+
+					var items = litMap.Items;
+					var keys = items.Keys();
+
+					if (keys.Length() > 0)
+					{
+						Write('"' + keys[0] + '"' + ": ");
+						TranslateExpression(items[keys[0]]);
+
+						for (int i = 1; i < keys.Length(); i++)
+						{
+							Write(", ");
+							Write('"' + keys[i] + '"' + ": ");
+							TranslateExpression(items[keys[i]]);
+						}
+					}
+
+					Write("}");
+					break;
+				}
+
+
+				// Typecast
+				case ExpressionType.Typecast:
+				{
+					var typecast = (TypecastExpressionNode)expr;
+
+					var toType = _scope.OwnerMethod.Owner.GetType(typecast.ToType);
+					var fromType = typecast.Expr.GetTypeOf(_scope);
+
+					// Not sure if to keep
+					/*if (toType == Interface.String)
+					{
+						Write("_valToString(");
+						TranslateExpression(typecast.Expr);
+						Write(")");
+						return;
+					}*/
+
+					bool castFloatToInt = false;
+					if (fromType == Interface.FloatType && toType == Interface.IntType)
+					{
+						castFloatToInt = true;
+						Write("Math.floor(");
+					}
+
+					TranslateExpression(typecast.Expr);
+
+					if (castFloatToInt)
+						Write(")");
+
+					break;
+				}
+
+				// Assembly
+				case ExpressionType.Assembly:
+				{
+					var assembly = (AssemblyExpressionNode)expr;
+
+					Write(assembly.Assembly);
+
+					// Passing locals. Doesn't work properly anyway
+					/*string pars;
+					string args;
+
+					ScopeItem[] items = [];
+					_scope.GetAllItems(items);
+
+					if (items.Length() > 0)
+					{
+						pars += items[0].Name;
+						args += items[0].CompiledName();
+
+						for (int i = 1; i < items.Length(); i++)
+						{
+							pars += ", " + items[i].Name;
+							args += ", " + items[i].CompiledName();
+						}
+					}
+
+					WriteLine("(function(" + pars + ") {", false);
+					Indent();
+					WriteLine("return " + assembly.Assembly);
+					Outdent();
+					Write("})(" + args + ")", true);*/
+
+					break;
+				}
+
+
+				// HTML
+				case ExpressionType.HTML:
+				{
+					TranslateHTML((HTMLExpressionNode)expr);
+					break;
+				}
+				case ExpressionType.HTMLText:
+				{
+					TranslateHTMLText((HTMLTextExpressionNode)expr);
+					break;
+				}
+				case ExpressionType.HTMLCode:
+				{
+					TranslateExpression(((HTMLCodeExpressionNode)expr).Code);
+					break;
+				}
+
+			}
+		}
+
+
+
+		void TranslateHTML(HTMLExpressionNode html)
+		{
+			var htmlClass = (Class)_symbolTable.GetNamespaceBySignature("std").GetNamespaceBySignature("html").GetNamespaceBySignature("HTMLElement");
+			var constr = htmlClass.GetMember("_New(string,map<object>,object)");
+
+			var attr = html.Attributes;
+			var clone = html.AttributeClone;
+			var children = html.Children;
+
+
+			// Basic tags
+			if (html.IsBasic())
+			{
+				Write("std.html.HTMLElement." + constr.CompiledName() + "(new std.html.HTMLElement(), \"" + html.Elem.Name + "\", ");
+
+				if (clone)
+					Write("Object.assign({");
+				else
+					Write("{");
+
+				if (attr.Keys().Length() > 0)
+				{
+					Write("\"" + attr.Keys()[0] + "\": ");
+					TranslateExpression(attr[attr.Keys()[0]]);
+
+					for (int a = 1; a < attr.Keys().Length(); a++)
+					{
+						Write(", \"" + attr.Keys()[a] + "\": ");
+						TranslateExpression(attr[attr.Keys()[a]]);
+					}
+				}
+
+				if (clone)
+				{
+					Write("}, ");
+					TranslateExpression(clone);
+					Write("), ");
+				}
+				else
+					Write("}, ");
+
+				if (children.Length() > 0)
+				{
+					if (children[0].ExprType == ExpressionType.HTMLCode)
+					{
+						var code = (HTMLCodeExpressionNode)children[0];
+						var ctype = code.Code.GetTypeOf(_scope);
+
+						if (ctype.IsArray())
+						{
+							TranslateExpression(code.Code);
+							Write(")");
+							return;
+						}
+					}
+
+					Write("[");
+					TranslateExpression(children[0]);
+					for (int c = 1; c < children.Length(); c++)
+					{
+						Write(", ");
+						TranslateExpression(children[c]);
+					}
+					Write("]");
+				}
+				else
+					Write("[]");
+
+				Write(")");
+			}
+
+			// Not a basic tag
+			else
+			{
+				var found = _scope.OwnerMethod.Owner.GetInterfaceFromTypeNode(html.Elem);
+
+				if (found)
+				{
+					// Templates
+					if (found.GetSymbolType() == SymbolType.Template)
+					{
+						var templ = (Template)found;
+
+						Write(found.FullName + "({");
+
+						/*int count = 0;
+						foreach (var param in templ.Parameters)
+						{
+							if (count > 0) Write(", ");
+
+							Write("\"" + param.Name + "\": ");
+
+							if (attr.HasKey(param.Name))
+								TranslateExpression(attr[param.Name]);
+							else
+								Write((string)param.Default);
+
+							count++;
+						}*/
+						if (attr.Keys().Length() > 0)
+						{
+							Write("\"" + attr.Keys()[0] + "\": ");
+							TranslateExpression(attr[attr.Keys()[0]]);
+
+							for (int a = 1; a < attr.Keys().Length(); a++)
+							{
+								Write(", \"" + attr.Keys()[a] + "\": ");
+								TranslateExpression(attr[attr.Keys()[a]]);
+							}
+						}
+
+						Write("}, [");
+
+						if (children.Length() > 0)
+						{
+							TranslateExpression(children[0]);
+							for (int c = 1; c < children.Length(); c++)
+							{
+								Write(", ");
+								TranslateExpression(children[c]);
+							}
+						}
+
+						Write("])");
+
+						/*Write(found.FullName + "(Object.assign({");
+
+						int count = 0;
+						foreach (var param in templ.Parameters)
+						{
+							if (count > 0) Write(", ");
+							Write("\"" + param.Name + "\": ");
+							TranslateExpression((ExpressionNode)param.Default);
+							count++;
+						}
+
+						Write("}, {");
+
+						count = 0;
+						foreach (var key in attr.Keys())
+						{
+							if (count > 0) Write(", ");
+							Write('"' + key + "\": ");
+							TranslateExpression(attr[key]);
+							count++;
+						}
+
+						Write("}), [");
+
+						if (children.Length() > 0)
+						{
+							TranslateExpression(children[0]);
+							for (int c = 1; c < children.Length(); c++)
+							{
+								Write(", ");
+								TranslateExpression(children[c]);
+							}
+						}
+
+						Write("])");*/
+					}
+
+					// Components
+					else
+					{
+
+					}
+				}
+
+			}
+		}
+
+		void TranslateHTMLText(HTMLTextExpressionNode html)
+		{
+			var htmlClass = (Class)_symbolTable.GetNamespaceBySignature("std").GetNamespaceBySignature("html").GetNamespaceBySignature("HTMLTextElement");
+			var constr = htmlClass.GetMember("_New(string)");
+			
+			Write("std.html.HTMLTextElement." + constr.CompiledName() + "(new std.html.HTMLTextElement(), ");
+			TranslateExpression(html.Text);
+			Write(")");
+		}
+
+		void TranslateStore(ExpressionNode dest, ExpressionNode val)
+		{
+			var intr = _scope.OwnerMethod.Owner;
+			Property prop = null;
+
+			// a = b
+			if (dest.ExprType == ExpressionType.Load)
+			{
+				var ldest = (LoadExpressionNode)dest;
+
+				// Maybe a field or property in this class
+				var found = _scope.OwnerMethod.Owner.GetMember(ldest.VarName);
+
+				if (found && found.MemberType == MemberType.Property)
+				{
+					Write("self");
+					prop = (Property)found;
+				}
+			}
+
+			// a.b = c. Might be a property assignment too
+			else if (dest.ExprType == ExpressionType.Access)
+			{
+				bool staticAccess = false;
+				var ldest = (AccessExpressionNode)dest;
+
+				intr = ldest.Expression.GetTypeOf(_scope);
+				
+				// If the type on the left can't be found then it's not a local variable but it's probably a class
+				if (!intr)
+				{
+					intr = ldest.Expression.TryGetType(_scope);
+					staticAccess = true;
+				}
+
+				if (intr)
+				{
+					var found = intr.GetMember(ldest.Field);
+					if (found && found.MemberType == MemberType.Property)
+					{
+						if (!staticAccess)
+							TranslateExpression(ldest.Expression);
+						else
+							Write(intr.GetSignatureTo(_scope.OwnerMethod.Owner.Namespace));
+
+						prop = (Property)found;
+					}
+				}
+			}
+
+			// If property in this class
+			if (prop)
+			{
+				var found = (Method)intr.GetMember("set" + prop.CompiledName() + "(" + prop.Type.Signature() + ")");
+				Write("." + found.CompiledName() + "(");
+			}
+			else
+			{
+				TranslateExpression(dest);
+				Write(" = ");
+			}
+
+			TranslateExpression(val);
+
+			if (prop)
+				Write(")");
+		}
+
+
+		void TranslateArgList(ExpressionNode[] args, Method call = null)
+		{
+			Write("(");
+
+			if (args.Length() > 0)
+			{
+
+				// For objects and native types
+				if (!call)
+				{
+					TranslateExpression(args[0]);
+					for (int a = 1; a < args.Length(); a++)
+					{
+						Write(", ");
+						TranslateExpression(args[a]);
+					}
+				}
+				else
+				{
+					TranslateExpression(args[0]);
+
+					for (int a = 1; a < args.Length(); a++)
+					{
+						Write(", ");
+						TranslateExpression(args[a]);
+					}
+
+					if (args.Length() < call.Parameters.Length())
+					{
+						for (int a = args.Length(); a < call.Parameters.Length(); a++)
+						{
+							Write(", ");
+							Write((string)call.Parameters[a].Default);
+						}
+					}
+				}
+			}
+			else if (call && call.Parameters && call.Parameters.Length() > 0)
+			{
+				Write((string)call.Parameters[0].Default);
+
+				for (int a = 1; a < call.Parameters.Length(); a++)
+				{
+					Write(", ");
+					Write((string)call.Parameters[a].Default);
+				}
+			}
+
+			Write(")");
+		}
+
+		void TranslateArgListWithSelf(ExpressionNode[] args, Method call)
+		{
+			Write("(self");
+
+			foreach (var arg in args)
+			{
+				Write(", ");
+				TranslateExpression(arg);
+			}
+
+			if (args.Length() < call.Parameters.Length())
+			{
+				for (int a = args.Length(); a < call.Parameters.Length(); a++)
+				{
+					Write(", ");
+					Write((string)call.Parameters[a].Default);
+				}
+			}
+
+			Write(")");
+		}
+
+	private:
+		SymbolTable _serverSymbolTable;
+		int _namespaceDepth;
+		int _loopDepth;
+		Scope _scope;
+		bool _inPlugin;
+		int _packageId;
+
+		void AddScope()
+		{
+			if (_scope)
+			{
+				var newScope = new Scope(_scope.OwnerMethod, _scope);
+				_scope = newScope;
+			}
+		}
+
+		void PopScope()
+		{
+			if (_scope)
+				_scope = _scope.Parent;
+		}
+
+
+	}
+
+}

@@ -1,0 +1,679 @@
+using std;
+
+
+namespace eco
+{
+	
+
+	/** Standard library */
+	class EcoStdLib
+	{
+
+
+		// -----------------------------------------------------------------
+		// Object
+		// -----------------------------------------------------------------
+
+		static void CreateObjectMethods(Interface intr)
+		{
+			// bool IsArray()
+			intr.AddMember(
+				Method.Create(Interface.BoolType, "IsArray",
+					[],
+					{
+						js: "(Object.prototype.toString.call($t) === '[object Array]')",
+						php: "is_array($t)"
+					},
+
+					SymbolDoc.Create("Checks if the object is an array", [])
+				)
+			);
+
+			// bool IsMap()
+			intr.AddMember(
+				Method.Create(Interface.BoolType, "IsMap",
+					[],
+					{
+						js: "(!(Object.prototype.toString.call($t) === '[object String]') && (Object.keys($t).length > 0))"
+					},
+
+					SymbolDoc.Create("Checks if the object is a map", [])
+				)
+			);
+
+			// bool IsFunction()
+			intr.AddMember(
+				Method.Create(Interface.BoolType, "IsFunction",
+					[],
+					{
+						js: "($t && {}.toString.call($t) === '[object Function]')"
+					},
+
+					SymbolDoc.Create("Checks if the object is a function", [])
+				)
+			);
+
+			// bool IsString()
+			intr.AddMember(
+				Method.Create(Interface.BoolType, "IsString",
+					[],
+					{
+						js: "(Object.prototype.toString.call($t) === '[object String]')",
+						php: "is_string($t)"
+					},
+
+					SymbolDoc.Create("Checks if the object is a string", [])
+				)
+			);
+
+			// bool IsNumeric()
+			intr.AddMember(
+				Method.Create(Interface.BoolType, "IsNumeric",
+					[],
+					{
+						js: "(!isNaN(parseFloat($t)) && isFinite($t))"
+					},
+
+					SymbolDoc.Create("Checks if the object is a number", [])
+				)
+			);
+		}
+
+
+		// -----------------------------------------------------------------
+		// String
+		// -----------------------------------------------------------------
+
+		static void CreateStringMethods(Interface intr)
+		{
+			// string Format(string[] args)
+			intr.AddMember(
+				Method.Create(Interface.StringType, "Format",
+					[{type: Interface.StringType.ArrayOf, name: "args"}],
+
+					{
+						block: "{ string out = \"\"; bool inbrace = false; string found = \"\"; for (int c = 0; c < this.Length(); c++) { if (inbrace) { if (this[c] == '}') { inbrace = false; out += (string)(args[found.ToInt()]); found = \"\"; } else found += this[c]; } else { if (c < this.Length() - 1 && this[c] == '%' && this[c + 1] == '{') { c++; inbrace = true; } else out += this[c]; } } return out; }"
+					},
+
+					SymbolDoc.Create(
+						"Create a parameterised string by inserting arguments into a template",
+						[
+							ParamDoc.Create("args", "The arguments to insert into the template")
+						]
+					)
+				)
+			);
+
+			// int Length()
+			intr.AddMember(
+				Method.Create(Interface.IntType, "Length",
+					[],
+					{
+						js: "$t.length",
+						php: "strlen($t)"
+					},
+
+					SymbolDoc.Create(
+						"Returns the length of the string", []
+					)
+				)
+			);
+
+			// string SubString(int start, int length)
+			intr.AddMember(
+				Method.Create(intr, "SubString",
+					[
+						{intr: Interface.IntType, name: "start"},
+						{intr: Interface.IntType, name: "length"}
+					],
+
+					{
+						php: "substr($t, $1, $2)",
+						js: "$t.substr($1, $2)"
+					},
+
+					SymbolDoc.Create(
+						"Get an inner piece of the script",
+						[
+							ParamDoc.Create("start", "The beginning of the sub-string"),
+							ParamDoc.Create("length", "How far from the start to grab")
+						]
+					)
+				)
+			);
+
+			// string[] Split(string token)
+			intr.AddMember(
+				Method.Create(intr.ArrayOf, "Split",
+					[
+						{type: intr, name: "delimiter"}
+					],
+
+					{
+						php: "explode($1, $t)",
+						js: "$t.split($1)"
+					}
+				)
+			);
+
+			// int ToInt()
+			intr.AddMember(
+				Method.Create(Interface.IntType, "ToInt",
+					[],
+					{
+						js: "parseInt($t)",
+						php: "(int)($t)"
+					}
+				)
+			);
+
+			// int ToFloat()
+			intr.AddMember(
+				Method.Create(Interface.FloatType, "ToFloat",
+					[],
+					{
+						js: "parseFloat($t)",
+						php: "(float)($t)"
+					}
+				)
+			);
+		}
+
+		// -----------------------------------------------------------------
+		// Array
+		// -----------------------------------------------------------------
+
+		static void CreateArrayMethods(ArrayType intr)
+		{
+			// int Length()
+			intr.AddMember(
+				Method.Create(Interface.IntType, "Length",
+					[],
+
+					{
+						js: "$t.length",
+						php: "sizeof($t)"
+					},
+
+					SymbolDoc.Create("Get length of array")
+				)
+			);
+
+			// bool IsEmpty()
+			intr.AddMember(
+				Method.Create(Interface.BoolType, "IsEmpty",
+					[],
+					{
+						js: "($t.length == 0)",
+						php: "(sizeof($t) == 0)"
+					},
+
+					SymbolDoc.Create("Check if array is empty")
+				)
+			);
+
+			// void Add(T)
+			intr.AddMember(
+				Method.Create(Interface.VoidType, "Add",
+					[
+						{type: intr.Elem, name: "item"}
+					],
+
+					{
+						js: "$t.push($1)",
+						php: "array_push($t, $1)"
+					},
+
+					SymbolDoc.Create(
+						"Add an item to the end of the array",
+						[
+							ParamDoc.Create("item", "The item to add")
+						]
+					)
+				)
+			);
+
+			// void Enque(T item)
+			intr.AddMember(
+				Method.Create(Interface.VoidType, "Enque",
+					[{type: intr.Elem, name: "item"}],
+
+					{
+						js: "$t.unshift($1)",
+						php: "array_unshift($t, $1)"
+					},
+
+					SymbolDoc.Create("Add an item to the beginning of array", [
+						ParamDoc.Create("item", "The item to add to the start of the array")
+					])
+				)
+			);
+
+			// T[] Concat(T[] items)
+			intr.AddMember(
+				Method.Create(intr, "Concat",
+					[{type: intr, name: "items"}],
+
+					{
+						js: "$t.concat($1)",
+						php: "__concat($t, $1)"
+					},
+
+					SymbolDoc.Create("Returns a new array with items appended to the end of current array", [
+						ParamDoc.Create("name", "List of items to concatenate to the end")
+					])
+				)
+			);
+
+			// T Pop()
+			intr.AddMember(
+				Method.Create(intr.Elem, "Pop",
+					[
+					],
+
+					{
+						js: "$t.pop()",
+						php: "array_pop($t)"
+					},
+
+					SymbolDoc.Create("Remove an item from the end of the array and return it", [])
+				)
+			);
+
+
+
+			// bool Contains(T item)
+			intr.AddMember(
+				Method.Create(Interface.BoolType, "Contains",
+					[{type: intr.Elem, name: "item"}],
+
+					{
+						js: "$t.includes($1)",
+						php: "in_array($1, $t)"
+					},
+
+					SymbolDoc.Create("Returns true if the array contains given element, false otherwise",[
+						ParamDoc.Create("item", "The item to check")
+					])
+				)
+			);
+
+			// void Remove(int index)
+			intr.AddMember(
+				Method.Create(Interface.VoidType, "Remove",
+					[{type: Interface.IntType, name: "index"}],
+
+					{
+						js: "$t.splice($1, 1)",
+						php: "unset($t[$1])"
+					},
+
+					SymbolDoc.Create("Removes an element from the array at the given index. This modifies the original array", [
+						ParamDoc.Create("index", "The index of the array to remove")
+					])
+				)
+			);
+
+			// int IndexOf(T value)
+			intr.AddMember(
+				Method.Create(Interface.IntType, "IndexOf",
+					[{type: intr.Elem, name: "value"}],
+
+					{
+						js: "$t.indexOf($1)",
+						php: "array_search($1, $t)"
+					},
+
+					SymbolDoc.Create("Get the index of the first instance of a value in the array. Returns -1 or false (JS/PHP) if not found", [
+						ParamDoc.Create("value", "The value to search for in the array")
+					])
+				)
+			);
+
+			// T[] RemoveItem(T item)
+			intr.AddMember(
+				Method.Create(intr, "RemoveItem",
+					[{type: intr.Elem, name: "item"}],
+
+					{
+						block: "{ var narray = []; foreach (var i in this) { if (i != item) narray.Add(i); } return narray; }"
+					},
+
+					SymbolDoc.Create(
+						"Returns a new array without any occurances of supplied item",
+						[
+							ParamDoc.Create("item", "The item to exclude from returned array")
+						]
+					)
+				)
+			);
+
+			// array Map(function<T>:object iterator)
+			intr.AddMember(
+				Method.Create(Interface.ObjectType.ArrayOf, "Map",
+					[
+						{type: FunctionType.Create([intr.Elem], Interface.ObjectType), name: "iterator"}
+					],
+
+					{
+						js: "$t.map($1)",
+						php: "array_map($1, $t)"
+					},
+
+					SymbolDoc.Create(
+						"Iterate over array",
+						[
+							ParamDoc.Create(
+								"iterator",
+								"The function to execute for each item",
+								[
+									ParamDoc.Create(
+										"value",
+										"The current value in the array"
+									)
+								]
+							)
+						]
+					)
+				)
+			);
+
+			// array Map(function<T, int>:object iterator)
+			intr.AddMember(
+				Method.Create(Interface.ObjectType.ArrayOf, "Map",
+					[
+						{type: FunctionType.Create([intr.Elem, Interface.IntType], Interface.ObjectType), name: "iterator"}
+					],
+
+					{
+						js: "$t.map($1)",
+						php: "array_map($1, $t)"
+					},
+
+					SymbolDoc.Create(
+						"Iterate over array",
+						[
+							ParamDoc.Create(
+								"iterator",
+								"The function to execute for each item",
+								[
+									ParamDoc.Create(
+										"value",
+										"The current value in the array"
+									),
+
+									ParamDoc.Create(
+										"index",
+										"The current index in the array"
+									)
+								]
+							)
+						]
+					)
+				)
+			);
+
+
+			// T[] Where(function<T>:bool iterator)
+			intr.AddMember(
+				Method.Create(intr, "Where",
+					[
+						{type: FunctionType.Create([intr.Elem], Interface.BoolType), name: "iterator"}
+					],
+
+					{
+						js: "$t.filter($1)"
+					},
+
+					SymbolDoc.Create(
+						"Build an array from items that return true from the iterator",
+						[
+							ParamDoc.Create(
+								"iterator",
+								"The function to execute for each item. Return true to add item to resulting array",
+								[
+									ParamDoc.Create(
+										"value",
+										"The current value in the array"
+									)
+								]
+							)
+						]
+					)
+				)
+			);
+
+
+			// string Join(string glue)
+			intr.AddMember(
+				Method.Create(Interface.StringType, "Join",
+					[
+						{type: Interface.StringType, name: "glue"}
+					],
+
+					{
+						php: "implode($1, $t)",
+						js: "$t.join($1)"
+					},
+
+					SymbolDoc.Create(
+						"Join array items into a string",
+						[
+							ParamDoc.Create(
+								"glue",
+								"The token put between each item in the array"
+							)
+						]
+					)
+				)
+			);
+		}
+
+
+		// -----------------------------------------------------------------
+		// Map
+		// -----------------------------------------------------------------
+
+		static void CreateMapMethods(MapType intr)
+		{
+			// void Map(function<string, T> iterator)
+			intr.AddMember(
+				Method.Create(Interface.VoidType, "Map",
+					[
+						{type: FunctionType.Create([Interface.StringType, intr.Elem]), name: "iterator"}
+					],
+
+					{
+						block: "{ return iterator; }"
+					},
+
+					SymbolDoc.Create(
+						"Iterate over map",
+						[
+							ParamDoc.Create(
+								"iterator",
+								"The function to execute for each item",
+								[
+									ParamDoc.Create(
+										"key",
+										"The current key in the map"
+									),
+
+									ParamDoc.Create(
+										"value",
+										"The current value in the map"
+									)
+								]
+							)
+						]
+					)
+				)
+			);
+
+
+			// string[] Keys()
+			intr.AddMember(
+				Method.Create(Interface.StringType.ArrayOf, "Keys",
+					[],
+					{
+						js: "Object.keys($t)",
+						php: "array_keys($t)"
+					},
+
+					SymbolDoc.Create("Get keys of maps", [])
+				)
+			);
+
+
+			// bool HasKey(string)
+			intr.AddMember(
+				Method.Create(Interface.BoolType, "HasKey",
+					[{type: Interface.StringType, name: "key"}],
+					{
+						js: "(($t)[$1] !== undefined)",
+						php: "array_key_exists($1, $t)"
+					},
+
+					SymbolDoc.Create("Check if a key exists in the map", [
+						ParamDoc.Create("key", "The key to look for")
+					])
+				)
+			);
+
+			// map<T> Omit(string[])
+			intr.AddMember(
+				Method.Create(intr, "Omit",
+					[{type: Interface.StringType.ArrayOf, name: "keys"}],
+					{
+						block: "{ var res = {}; foreach (var existing in this.Keys()) { if (!keys.Contains(existing)) res[existing] = this[existing]; } return res; }"
+					},
+
+					SymbolDoc.Create("Returns a new map with the selected keys removed", [
+						ParamDoc.Create("keys", "The keys to remove from the input map")
+					])
+				)
+			);
+
+			// void Delete(string)
+			intr.AddMember(
+				Method.Create(Interface.VoidType, "Delete",
+					[{type: Interface.StringType, name: "key"}],
+					{
+						js: "delete $t[$1]",
+						php: "unset($t[$1])"
+					},
+
+					SymbolDoc.Create("Deletes a key from a map", [
+						ParamDoc.Create("key", "The key to remove from the map")
+					])
+				)
+			);
+
+			// map<T> Merge(map<T>)
+			intr.AddMember(
+				Method.Create(intr, "Merge",
+					[{type: intr, name: "obj"}],
+
+					{
+						block: "{ var res = {}; foreach (var i in this.Keys()) res[i] = this[i]; foreach (var i in obj.Keys()) if (!res.HasKey(i)) res[i] = obj[i]; return res; }"
+					},
+
+					SymbolDoc.Create("Returns a new object by merging this object with another", [
+						ParamDoc.Create("obj", "The object to merge this with")
+					])
+				)
+			);
+
+		}
+
+
+		// -----------------------------------------------------------------
+		// Event
+		// -----------------------------------------------------------------
+
+		static void CreateEventMethods(EventType intr)
+		{
+			var listener = new FunctionType();
+			listener.ReturnType = Interface.VoidType;
+			var callParams = [];
+			int count = 0;
+			var block = "{ foreach (var listener in this) listener("; //") }"
+			foreach (var paramType in intr.ParamTypes)
+			{
+				listener.AddParamType(paramType);
+
+				callParams.Add({type: paramType, name: "value" + (string)( (count > 0 ? ("" + (count + 1)) : "") )});
+				if (count > 0) block += ", ";
+				block += "value" + (string)((count > 0) ? ("" + (count + 1)) : "");
+				count++;
+			}
+			block += "); }";
+
+
+			// Bind
+			intr.AddMember(
+				Method.Create(Interface.VoidType, "Bind",
+					[{type: listener, name: "listener"}],
+					{
+						js: "$t.push($1)",
+						php: "array_push($t, $1)"
+					},
+
+					SymbolDoc.Create(
+						"Register a listener for the event",
+						[
+							//ParamDoc.Create("listener", "The function to call when the event is fired")
+						]
+					)
+				)
+			);
+
+			// Call
+			intr.AddMember(
+				Method.Create(Interface.VoidType, "Call",
+					(map[])((object)callParams),
+					{
+						//block: block
+						js: "$t.forEach(function(receiver) { receiver(" + intr.ParamTypes.Map(function(Interface intr, int index) { return "$" + (index + 1); }).Join(", ") + "); })",
+						php: ""
+					},
+
+					SymbolDoc.Create("Call the event", [])
+				)
+			);
+		}
+
+		// -----------------------------------------------------------------
+		// IPackageInitialiser
+		// -----------------------------------------------------------------
+
+		static void CreatePackageInitialiserMethods(Interface intr)
+		{
+
+			// Uninstall
+			intr.AddMember(
+				Method.CreateStatic(Interface.VoidType, "Uninstall", [], {},
+					SymbolDoc.Create("Called when a package is being uninstalled", [])
+				)
+			);
+		}
+
+
+		// -----------------------------------------------------------------
+		// IEntryPoint
+		// -----------------------------------------------------------------
+
+		static void CreateEntryPointMethods(Interface intr)
+		{
+
+			// Uninstall
+			intr.AddMember(
+				Method.CreateStatic(Interface.VoidType, "Start", [], {},
+					SymbolDoc.Create("This method is called when the site starts", [])
+				)
+			);
+		}
+	}
+
+
+}

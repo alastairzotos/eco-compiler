@@ -1,0 +1,65 @@
+using std;
+
+
+namespace eco
+{
+
+	/** Parser error */
+	class ParserError
+	{
+		new(string fileId, string fileName, string msg, int startLine, int endLine, int startColumn, int endColumn)
+		{
+			_fileId = fileId;
+			_fileName = fileName;
+			_msg = msg;
+
+			_startLine = startLine;
+			_endLine = endLine;
+
+			_startColumn = startColumn;
+			_endColumn = endColumn;
+		}
+
+		string FileID : private _fileId
+		{
+			get return _fileId;
+		}
+
+		string FileName : private _fileName
+		{
+			get return _fileName;
+		}
+
+		string Message : private _msg
+		{
+			get return _msg;
+		}
+
+		int StartLine : private _startLine
+		{
+			get return _startLine;
+		}
+
+		int EndLine : private _endLine
+		{
+			get return _endLine;
+		}
+
+		int StartColumn : private _startColumn
+		{
+			get return _startColumn;
+		}
+
+		int EndColumn : private _endColumn
+		{
+			get return _endColumn;
+		}
+
+
+		string ToString() alias
+		{
+			return "Error (" + _fileId + ", " + _fileName + "), line ${_startLine}, column ${_startColumn}: ${_msg}";
+		}
+
+	}
+}

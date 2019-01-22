@@ -1,0 +1,188 @@
+using std;
+
+namespace eco
+{
+	
+	/** Scope item */
+	class ScopeItem
+	{
+		new(Interface type, string name, bool isNative, bool visible = true)
+		{
+			ItemType = type;
+			Name = name;
+			Native = isNative;
+			Visible = visible;
+		}
+
+		string CompiledName()
+		{
+			if (Overload == 0)
+				return Name;
+
+			if (Lexer.IsDigit(Name[Name.Length() - 1]))
+				return Name + "_" + Overload;
+
+			return Name + Overload;
+		}
+
+		string Name;
+		Interface ItemType;
+		int Overload;
+		bool Native;
+		bool Visible;
+		int Index;
+	}
+
+
+	/** Scope */
+	class Scope
+	{
+		new(Method method, Scope parent = null)
+		{
+			_method = method;
+			_parent = parent;
+			_items = [];
+
+			if (_parent)
+			{
+				_root = _parent._root;
+				_size = _parent.Size;
+			}
+			else
+			{
+				_root = this;
+				var selfItem = AddItem(method.Owner, "self");
+			}
+
+			if (method && (!parent || parent._method != method))
+			{
+				foreach (var param in method.Parameters)
+					AddItem(param.Type, param.Name);
+			}
+		}
+
+		Method OwnerMethod : private _method
+		{
+			get return _method;
+		}
+
+		Scope Parent : private _parent
+		{
+			get return _parent;
+		}
+
+		ScopeItem[] Items : private _items
+		{
+			get return _items;
+		}
+
+		int Size : private _size
+		{
+			get return _size;
+		}
+
+		int GetOverload(ScopeItem item)
+		{
+			var overload = 0;
+			if (_parent)
+				overload = _parent.GetOverload(item);
+
+			foreach (var i in _items)
+				if (i.CompiledName() == item.CompiledName())
+					overload++;
+
+			return overload;
+		}
+
+		ScopeItem AddItem(Interface type, string name, bool isNative = false)
+		{
+			bool valid = true;
+			foreach (var item in _items)
+			{
+				if (item.Name == name && item.Visible)
+				{
+					valid = false;
+					break;
+				}
+			}
+
+			IncSize();
+
+			var item = new ScopeItem(type, name, isNative);
+			item.Overload = GetOverload(item);
+			item.Index = _size;
+			_items.Add(item);
+
+			// Add a hidden item to the root to avoid having the same name later in an outer scope
+			// Javascript uses function-level scope so this won't work: {{int foo;} int foo;}
+			if (_root != _parent)
+				_root._items.Add(new ScopeItem(type, name, isNative, false));
+
+			return valid ? item : null;
+		}
+		void GetAllItems(ScopeItem[] items)
+		{
+			if (_parent)
+				_parent.GetAllItems(items);
+
+			foreach (var item in _items)
+				if (item.Visible)
+					items.Add(item);
+		}
+
+		ScopeItem[] GetItemsStartingWith(string token)
+		{
+			var len = token.Length();
+
+			ScopeItem[] items = [new ScopeItem(_method.Owner, "this", false)];
+
+			ScopeItem[] allItems = [];
+			GetAllItems(allItems);
+
+			foreach (var item in allItems)
+			{
+				if (item.Name.SubString(0, len) == token)
+					items.Add(item);
+			}
+
+			return items;
+		}
+
+		ScopeItem GetItem(string name)
+		{
+			if (name == "this")
+				return GetItem("self");
+
+			foreach (var item in _items)
+			{
+				if (item.Name == name && item.Visible)
+					return item;
+			}
+
+			if (_parent)
+				return _parent.GetItem(name);
+
+			return null;
+		}
+
+		void IncSize()
+		{
+			_size++;
+
+			if (_parent)
+				_parent.IncSize();
+		}
+
+		void DecSize()
+		{
+			_size--;
+
+			if (_parent)
+				_parent.DecSize();
+		}
+
+	private:
+		Scope _root;
+
+	}
+}

@@ -1,0 +1,3377 @@
+/*
+* eco library (client)
+*
+* parser.eco
+*/
+
+using std;
+
+
+namespace eco
+{
+
+
+	/** Parser */
+	class Parser : Lexer
+	{
+		new()
+		{
+			_context = [];
+			_inService = false;
+		}
+
+
+		void ClearAlerts()
+		{
+			_dotAccessAlertCb = null;
+			_typeAlertCb = null;
+			_loadAlertCb = null;
+			_loadMemberlertCb = null;
+		}
+
+		void AlertOnDotAccess(int line, int col, function<Interface> cb)
+		{
+			_alertLine = line;
+			_alertColumn = col;
+			_dotAccessAlertCb = cb;
+		}
+
+		void AlertOnType(int line, int col, function<Namespace, ParserContext, bool> cb)
+		{
+			_alertLine = line;
+			_alertColumn = col;
+			_typeAlertCb = cb;
+		}
+
+		void AlertOnLoad(int line, int col, function<ScopeItem[]> cb)
+		{
+			_alertLine = line;
+			_alertColumn = col;
+			_loadAlertCb = cb;
+		}
+
+		void AlertOnLoadMember(int line, int col, function<Member[]> cb)
+		{
+			_alertLine = line;
+			_alertColumn = col;
+			_loadMemberlertCb = cb;
+		}
+
+
+		Namespace CurrentNamespace : private _currentNamespace
+		{
+			get return _currentNamespace;
+			set _currentNamespace = value;
+		}
+
+		bool InContext(ParserContext context)
+		{
+			foreach (var ctx in _context)
+				if (ctx == context)
+					return true;
+
+			return false;
+		}
+
+
+		bool CaptureExpressions = false;
+		function<> OnClearExpressions;
+		function<ExpressionNode> OnExpressionCreated;
+
+
+		// Parse code file
+		object ParseCodeFile()
+		{
+			_context = [];
+			_scope = null;
+			_lastDocComment = null;
+
+			TypeNode[] usings = [];
+			NamespaceNode[] nodes = [];
+			ImportNode[] imports = [];
+
+			if (CaptureExpressions)
+			{
+				if (OnClearExpressions) OnClearExpressions();
+				ExpressionNode.OnCreatedAndSet = OnExpressionCreated;
+			}
+			
+
+			AddContext(ParserContext.Namespace);
+
+			while (Check())
+			{
+				if (Check(TokenType.DocComment))
+					_lastDocComment = new SymbolDoc((string)Accept().Value);
+				
+
+				else if (Check(TokenType.K_Import))
+				{
+					Accept();
+					var file = (string)Accept(TokenType.String).Value;
+					Accept(TokenType.K_As, false);
+
+					var importNode = new ImportNode(file);
+
+					if (Check(TokenType.BraceOpen))
+					{
+						Accept();
+						importNode.AsNames.Add((string)Accept(TokenType.Ident).Value);
+
+						while (Check(TokenType.Comma))
+						{
+							Accept();
+							importNode.AsNames.Add((string)Accept(TokenType.Ident).Value);
+						}
+
+						Accept(TokenType.BraceClose, false);
+					}
+					else
+						importNode.AsNames.Add((string)Accept(TokenType.Ident).Value);
+
+					Accept(TokenType.Semicolon, false);
+					imports.Add(importNode);
+				}
+
+				else if (Check(TokenType.K_Using))
+				{
+					Accept();
+					AddContext(ParserContext.Using);
+					usings.Add(ParseType());
+					PopContext();
+					Accept(TokenType.Semicolon);
+				}
+
+				else if (Check(TokenType.K_Package))
+					nodes.Add(ParseNamespace());
+				else if (Check(TokenType.K_Interface))
+					nodes.Add(ParseInterface());
+				else if (Check(TokenType.K_Class))
+					nodes.Add(ParseClass());
+				else if (Check(TokenType.K_Enum))
+					nodes.Add(ParseEnum());
+				else if (Check(TokenType.K_Template))
+					nodes.Add(ParseTemplate());
+				else if (Check(TokenType.K_Typedef))
+				{
+					Accept();
+					var state = SaveState();
+					var typeDef = new TypedefNode((string)Accept(TokenType.Ident).Value);
+					typeDef.OtherType = ParseTypeFull();
+					typeDef.SetFromState(state);
+					Accept(TokenType.Semicolon, false);
+					nodes.Add(typeDef);
+				}
+
+				else
+					Error("Expected symbol");
+			}
+
+			PopContext();
+
+			return {usings: usings, nodes: nodes, imports: imports};
+		}
+
+
+		// Parse component server-side
+		ComponentServerNode ParseServerComponent(string name)
+		{
+			_context = [];
+			_scope = null;
+			_lastDocComment = null;
+
+			var comp = new ComponentServerNode(name);
+
+			// Check for usings
+			while (Check(TokenType.K_Using))
+			{
+				Accept();
+				AddContext(ParserContext.Using);
+				comp.AddComponentUsing(ParseType());
+				PopContext();
+				Accept(TokenType.Semicolon);
+			}
+
+			var startLine = _curLine;
+			var startCol = _curCol;
+
+			// Eat class token
+			Accept(TokenType.K_Class);
+
+
+			// Set line info
+			comp.StartLine = startLine;
+			comp.StartColumn = startCol;
+			comp.DefinitionEndLine = _curLine;
+			comp.DefinitionEndColumn = _curCol;
+
+			// Check for base class
+			if (Check(TokenType.Colon))
+			{
+				Accept();
+
+				comp.BaseClass = ParseType();
+			}
+
+
+			// Check for interfaces
+			if (Check(TokenType.SquareOpen))
+			{
+				Accept();
+
+				comp.Implement(ParseType());
+
+				while (Check(TokenType.Comma))
+				{
+					Accept();
+
+					comp.Implement(ParseType());
+				}
+
+				Accept(TokenType.SquareClose);
+			}
+
+			// Members
+			var access = MemberAccess.Public;
+			Accept(TokenType.BraceOpen);
+
+			// First we need render method
+			comp.AddMember(ParseComponentServerRenderMember());
+
+			// Rest of the members
+			while (!Check(TokenType.BraceClose))
+			{
+
+				if (Check(TokenType.K_Public))
+				{
+					Accept();
+					Accept(TokenType.Colon);
+
+					access = MemberAccess.Public;
+				}
+				else if (Check(TokenType.K_Protected))
+				{
+					Accept();
+					Accept(TokenType.Colon);
+
+					access = MemberAccess.Protected;
+				}
+				else if (Check(TokenType.K_Private))
+				{
+					Accept();
+					Accept(TokenType.Colon);
+
+					access = MemberAccess.Private;
+				}
+				else
+					ParseMember(comp, access);
+			}
+
+			Accept(TokenType.BraceClose);
+
+
+			comp.EndLine = _curLine;
+			comp.EndColumn = _curCol;
+
+
+			return comp;
+		}
+
+
+		// Parse component client-side
+		ComponentClientNode ParseClientComponent(string name)
+		{
+			_context = [];
+			_scope = null;
+			_lastDocComment = null;
+
+			var comp = new ComponentClientNode(name);
+
+			// Check for usings
+			while (Check(TokenType.K_Using))
+			{
+				Accept();
+				AddContext(ParserContext.Using);
+				comp.AddComponentUsing(ParseType());
+				PopContext();
+				Accept(TokenType.Semicolon);
+			}
+
+			var startLine = _curLine;
+			var startCol = _curCol;
+
+			// Eat class token
+			Accept(TokenType.K_Class);
+
+
+			// Set line info
+			comp.StartLine = startLine;
+			comp.StartColumn = startCol;
+			comp.DefinitionEndLine = _curLine;
+			comp.DefinitionEndColumn = _curCol;
+
+			// Check for base class
+			if (Check(TokenType.Colon))
+			{
+				Accept();
+
+				comp.BaseClass = ParseType();
+			}
+
+
+			// Check for interfaces
+			if (Check(TokenType.SquareOpen))
+			{
+				Accept();
+
+				comp.Implement(ParseType());
+
+				while (Check(TokenType.Comma))
+				{
+					Accept();
+
+					comp.Implement(ParseType());
+				}
+
+				Accept(TokenType.SquareClose);
+			}
+
+			// Members
+			var access = MemberAccess.Public;
+			Accept(TokenType.BraceOpen);
+
+			while (!Check(TokenType.BraceClose))
+			{
+
+				if (Check(TokenType.K_Public))
+				{
+					Accept();
+					Accept(TokenType.Colon);
+
+					access = MemberAccess.Public;
+				}
+				else if (Check(TokenType.K_Protected))
+				{
+					Accept();
+					Accept(TokenType.Colon);
+
+					access = MemberAccess.Protected;
+				}
+				else if (Check(TokenType.K_Private))
+				{
+					Accept();
+					Accept(TokenType.Colon);
+
+					access = MemberAccess.Private;
+				}
+				else
+					ParseMember(comp, access);
+			}
+
+			Accept(TokenType.BraceClose);
+
+
+			comp.EndLine = _curLine;
+			comp.EndColumn = _curCol;
+
+
+			return comp;
+		}
+
+
+		/** Parse initialiser */
+		InitialiserNode ParseInitialiser(string name)
+		{
+			_context = [];
+			_scope = null;
+			_lastDocComment = null;
+
+			var init = new InitialiserNode(name);
+
+			// Check for usings
+			while (Check(TokenType.K_Using))
+			{
+				Accept();
+				AddContext(ParserContext.Using);
+				init.AddInitialiserUsing(ParseType());
+				PopContext();
+				Accept(TokenType.Semicolon);
+			}
+
+
+			var startLine = _curLine;
+			var startCol = _curCol;
+
+			// Eat class token
+			Accept(TokenType.K_Class);
+
+			// Set line info
+			init.StartLine = startLine;
+			init.StartColumn = startCol;
+			init.DefinitionEndLine = _curLine;
+			init.DefinitionEndColumn = _curCol;
+
+			// Check for base class
+			if (Check(TokenType.Colon))
+			{
+				Accept();
+
+				init.BaseClass = ParseType();
+			}
+
+
+			// Check for interfaces
+			if (Check(TokenType.SquareOpen))
+			{
+				Accept();
+
+				init.Implement(ParseType());
+
+				while (Check(TokenType.Comma))
+				{
+					Accept();
+
+					init.Implement(ParseType());
+				}
+
+				Accept(TokenType.SquareClose);
+			}
+
+
+			// Members
+			var access = MemberAccess.Public;
+			Accept(TokenType.BraceOpen);
+
+			while (!Check(TokenType.BraceClose))
+			{
+				if (Check(TokenType.K_Public))
+				{
+					Accept();
+					Accept(TokenType.Colon);
+
+					access = MemberAccess.Public;
+				}
+				else if (Check(TokenType.K_Protected))
+				{
+					Accept();
+					Accept(TokenType.Colon);
+
+					access = MemberAccess.Protected;
+				}
+				else if (Check(TokenType.K_Private))
+				{
+					Accept();
+					Accept(TokenType.Colon);
+
+					access = MemberAccess.Private;
+				}
+				else
+					ParseMember(init, access);
+			}
+
+			Accept(TokenType.BraceClose);
+
+
+			init.EndLine = _curLine;
+			init.EndColumn = _curCol;
+
+
+			return init;
+			
+		}
+
+
+		/** Parse service */
+		ServiceNode ParseService(string name)
+		{
+			_context = [];
+			_scope = null;
+			_lastDocComment = null;
+			_inService = true;
+
+			var serv = new ServiceNode(name);
+
+			// Check for usings
+			while (Check(TokenType.K_Using))
+			{
+				Accept();
+				AddContext(ParserContext.Using);
+				serv.AddServiceUsing(ParseType());
+				PopContext();
+				Accept(TokenType.Semicolon);
+			}
+
+
+			var startLine = _curLine;
+			var startCol = _curCol;
+
+			// Eat class token
+			Accept(TokenType.K_Class);
+
+			// Set line info
+			serv.StartLine = startLine;
+			serv.StartColumn = startCol;
+			serv.DefinitionEndLine = _curLine;
+			serv.DefinitionEndColumn = _curCol;
+
+			// Check for base class
+			if (Check(TokenType.Colon))
+			{
+				Accept();
+
+				serv.BaseClass = ParseType();
+			}
+
+
+			// Check for interfaces
+			if (Check(TokenType.SquareOpen))
+			{
+				Accept();
+
+				serv.Implement(ParseType());
+
+				while (Check(TokenType.Comma))
+				{
+					Accept();
+
+					serv.Implement(ParseType());
+				}
+
+				Accept(TokenType.SquareClose);
+			}
+
+
+			// Members
+			var access = MemberAccess.Public;
+			Accept(TokenType.BraceOpen);
+
+			while (!Check(TokenType.BraceClose))
+			{
+				if (Check(TokenType.K_Public))
+				{
+					Accept();
+					Accept(TokenType.Colon);
+
+					access = MemberAccess.Public;
+				}
+				else if (Check(TokenType.K_Protected))
+				{
+					Accept();
+					Accept(TokenType.Colon);
+
+					access = MemberAccess.Protected;
+				}
+				else if (Check(TokenType.K_Private))
+				{
+					Accept();
+					Accept(TokenType.Colon);
+
+					access = MemberAccess.Private;
+				}
+				else
+					ParseMember(serv, access);
+			}
+
+			Accept(TokenType.BraceClose);
+
+
+			serv.EndLine = _curLine;
+			serv.EndColumn = _curCol;
+
+			_inService = false;
+
+
+			return serv;
+			
+		}
+
+
+		/* Parse method body */
+		BlockNode ParseMethodBody(Method method)
+		{
+
+			_context = [];
+			_lastDocComment = null;
+			_scope = new Scope(method);
+			AddContext(ParserContext.Member);
+
+			// If this is a normal method, or if it's a property getter/setter but has a block
+			if (!method.IsPropertyMethod || method.PropertyMethodIsBlock)
+			{
+				// Need to go back one character from start of definition to get open brace
+				var state = new LexerState(method.DefinitionStartPosition - 1, method.DefinitionStartLine, method.DefinitionStartColumn);
+				RestoreState(state);
+
+				// Reset old positions so they're not at the end of the file
+				_oldPos = state.Position;
+				_oldCol = state.Column;
+				_oldLine = state.Line;
+
+				// Parse
+				_lineStart = _curPos + 1 - _curCol + 1;		// This keeps the lexer from setting the column to the wrong place
+				var node = ParseBlock();
+				method.Block = node;
+
+				// Override definition starting positions as lexer can't faithfully keep old position before opening brace
+				method.DefinitionStartPosition = state.Position + 1;
+				method.DefinitionStartLine = state.Line;
+				method.DefinitionStartColumn = state.Column;
+
+				return node;
+			}
+
+			// Property method without a block
+			else
+			{
+				:console.log("MAKE IT RE-PARSE INLINE GETTERS AND SETTERS");
+				return null;
+			}
+
+			PopContext();
+		}
+
+
+		// ------------------------------------------------
+		// Symbol parsing
+		// ------------------------------------------------
+
+		NamespaceNode ParseNamespace()
+		{
+			var curCol = _curCol;
+			Accept();
+
+			var startLine = _curLine;
+			var name = (string)Accept(TokenType.Ident).Value;
+
+			var node = new NamespaceNode(name);
+			node.StartLine = startLine;
+			node.StartColumn = curCol;
+			node.DefinitionEndLine = _curLine;
+			node.DefinitionEndColumn = _curCol;
+
+			Accept(TokenType.BraceOpen);
+
+
+			// Put us into inner namespace
+			AddContext(ParserContext.Namespace);
+			if (_currentNamespace)
+				_currentNamespace = (Namespace)_currentNamespace.GetSymbolBySignature(name);
+
+			while (!Check(TokenType.BraceClose))
+			{
+				if (Check(TokenType.DocComment))
+					_lastDocComment = new SymbolDoc((string)Accept().Value);
+
+				else if (Check(TokenType.K_Using))
+				{
+					Accept();
+					AddContext(ParserContext.Using);
+					node.UseNamespace(ParseType());
+					PopContext();
+					Accept(TokenType.Semicolon);
+				}
+
+				else if (Check(TokenType.K_Package))
+					node.AddChild(ParseNamespace());
+				else if (Check(TokenType.K_Interface))
+					node.AddChild(ParseInterface());
+				else if (Check(TokenType.K_Class))
+					node.AddChild(ParseClass());
+				else if (Check(TokenType.K_Enum))
+					node.AddChild(ParseEnum());
+				else if (Check(TokenType.K_Template))
+					node.AddChild(ParseTemplate());
+				else if (Check(TokenType.K_Typedef))
+				{
+					Accept();
+					var state = SaveState();
+					var typeDef = new TypedefNode((string)Accept(TokenType.Ident).Value);
+					typeDef.OtherType = ParseTypeFull();
+					typeDef.SetFromState(state);
+					Accept(TokenType.Semicolon, false);
+					node.AddChild(typeDef);
+				}
+
+				else
+					Error("Expected symbol");
+			}
+
+
+			// Take us out of inner namespace
+			PopContext();
+			if (_currentNamespace)
+				_currentNamespace = _currentNamespace.Namespace;
+
+			Accept(TokenType.BraceClose);
+
+			node.EndLine = _curLine;
+			node.EndColumn = _curCol;
+
+			return node;
+		}
+
+
+		TemplateNode ParseTemplate()
+		{
+			var curCol = _curCol;
+			Accept();
+			var startLine = _curLine;
+
+			var name = (string)Accept(TokenType.Ident).Value;
+
+			var node = new TemplateNode(name);
+			node.StartLine = startLine;
+			node.StartColumn = curCol;
+			node.DefinitionEndLine = _curLine;
+			node.DefinitionEndColumn = _curCol;
+			node.Docs = _lastDocComment;
+			_lastDocComment = null;
+
+
+			// Parameters
+			Accept(TokenType.ParOpen);
+
+			if (!Check(TokenType.ParClose))
+			{
+				var intr = ParseTypeFull();
+				var name = (string)Accept(TokenType.Ident).Value;
+				Accept(OpType.Assign);
+				var defaultValue = ParseExpression();
+
+				node.AddParameter(intr, name, defaultValue);
+
+				while (Check(TokenType.Comma))
+				{
+					Accept();
+
+					intr = ParseTypeFull();
+					name = (string)Accept(TokenType.Ident).Value;
+					Accept(OpType.Assign);
+					defaultValue = ParseExpression();
+
+					node.AddParameter(intr, name, defaultValue);
+				}
+			}
+
+			Accept(TokenType.ParClose);
+
+			// Fake check to keep positions right
+			Check();
+
+			var mainMethod = new TemplateRenderNode(TypeNode.Generate("std.html.HTMLElement"), name);
+			mainMethod.Block = ParseBlock();
+			mainMethod.AddParam(new ArrayTypeNode(null), "children");
+			mainMethod.AddParam(new MapTypeNode(null), "attr");
+			node.MainMethod = mainMethod;
+
+
+			node.EndLine = _curLine;
+			node.EndColumn = _curCol;
+
+			return node;
+		}
+
+
+		InterfaceNode ParseInterface2()
+		{
+			var curCol = _curCol;
+			Accept();
+
+			var startLine = _curLine;
+			var name = (string)Accept(TokenType.Ident).Value;
+
+			var node = new InterfaceNode(name);
+			node.StartLine = startLine;
+			node.StartColumn = curCol;
+			node.DefinitionEndLine = _curLine;
+			node.DefinitionEndColumn = _curCol;
+			node.Docs = _lastDocComment;
+			_lastDocComment = null;
+
+
+			// Parse members
+			Accept(TokenType.BraceOpen);
+
+			// Put us into the interface namespace
+			AddContext(ParserContext.Interface);
+			if (_currentNamespace)
+				_currentNamespace = (Namespace)_currentNamespace.GetSymbolBySignature(name);
+
+			while (!Check(TokenType.BraceClose))
+			{
+				SymbolDoc doc = null;
+				if (Check(TokenType.DocComment))
+					doc = new SymbolDoc((string)Accept().Value);
+
+				var startLine = _curLine;
+				var startCol = _curCol;
+
+				var type = ParseTypeFull();
+				var name = (string)Accept(TokenType.Ident).Value;
+
+				if (Check(TokenType.ParOpen))
+				{
+					Accept();
+
+					var method = new MethodNode(type, name);
+					node.AddMember(method);
+					method.StartLine = startLine;
+					method.StartColumn = startCol;
+					method.Docs = doc;
+
+					while (!Check(TokenType.ParClose))
+					{
+						var pType = ParseTypeFull();
+						var pName = (string)Accept(TokenType.Ident).Value;
+
+						method.AddParam(pType, pName);
+
+						while (Check(TokenType.Comma))
+						{
+							Accept();
+							pType = ParseTypeFull();
+							pName = (string)Accept(TokenType.Ident).Value;
+
+							method.AddParam(pType, pName);
+						}
+					}
+
+					Accept(TokenType.ParClose);
+					Accept(TokenType.Semicolon);
+
+					method.EndLine = _curLine;
+					method.EndColumn = _curCol;
+				}
+				else
+				{
+					Accept(TokenType.Semicolon);
+
+					var fieldNode = new FieldNode(type, name);
+					fieldNode.StartLine = startLine;
+					fieldNode.StartColumn = startCol;
+					fieldNode.Docs = doc;
+
+					node.AddMember(fieldNode);
+				}
+			}
+
+			// Take us out of interface namespace
+			PopContext();
+			if (_currentNamespace)
+				_currentNamespace = _currentNamespace.Namespace;
+
+			Accept(TokenType.BraceClose);
+
+			node.EndLine = _curLine;
+			node.EndColumn = _curCol;
+
+			return node;
+		}
+
+		InterfaceNode ParseInterface()
+		{
+			var curCol = _curCol;
+			Accept();
+
+			var state = SaveState();
+			var oldPos = _oldPos;
+			var oldLineStart = _lineStart;
+			var startLine = _curLine;
+
+			// Try to parse a function interface. If failed, revert and parse regular interface
+			try
+			{
+				var returnType = ParseTypeFull();
+				var name = (string)Accept(TokenType.Ident).Value;
+
+				var typeDefNode = new TypedefNode(name);
+				typeDefNode.StartLine = startLine;
+				typeDefNode.StartColumn = curCol;
+
+				var otherType = new FunctionTypeNode();
+				otherType.ReturnType = returnType;
+				typeDefNode.OtherType = otherType;
+
+				Accept(TokenType.ParOpen);
+
+				if (!Check(TokenType.ParClose))
+				{
+					var paramType = ParseTypeFull();
+					if (Check(TokenType.Ident))
+					{
+						var paramName = (string)Accept().Value;
+						otherType.AddParam(paramType, paramName);
+					}
+					else
+						otherType.AddParamType(paramType);
+
+					while (Check(TokenType.Comma))
+					{
+						Accept();
+
+						var paramType = ParseTypeFull();
+						if (Check(TokenType.Ident))
+						{
+							var paramName = (string)Accept().Value;
+							otherType.AddParam(paramType, paramName);
+						}
+						else
+							otherType.AddParamType(paramType);
+					}
+				}
+
+				Accept(TokenType.ParClose);
+				Accept(TokenType.Semicolon, false);
+
+				return typeDefNode;
+			}
+			catch (ParserError e)
+			{
+				RestoreState(state);
+				Revert(oldPos);
+				_lineStart = oldLineStart;
+			}
+
+			// Parse regular interface
+			var name = (string)Accept(TokenType.Ident).Value;
+
+			var node = new InterfaceNode(name);
+			node.StartLine = startLine;
+			node.StartColumn = curCol;
+			node.DefinitionEndLine = _curLine;
+			node.DefinitionEndColumn = _curCol;
+			node.Docs = _lastDocComment;
+			_lastDocComment = null;
+
+
+			// Parse members
+			Accept(TokenType.BraceOpen);
+
+			// Put us into the interface namespace
+			AddContext(ParserContext.Interface);
+			if (_currentNamespace)
+				_currentNamespace = (Namespace)_currentNamespace.GetSymbolBySignature(name);
+
+			while (!Check(TokenType.BraceClose))
+			{
+				SymbolDoc doc = null;
+				if (Check(TokenType.DocComment))
+					doc = new SymbolDoc((string)Accept().Value);
+
+				var startLine = _curLine;
+				var startCol = _curCol;
+
+				var type = ParseTypeFull();
+				var name = (string)Accept(TokenType.Ident).Value;
+
+				if (Check(TokenType.ParOpen))
+				{
+					Accept();
+
+					var method = new MethodNode(type, name);
+					node.AddMember(method);
+					method.StartLine = startLine;
+					method.StartColumn = startCol;
+					method.Docs = doc;
+
+					while (!Check(TokenType.ParClose))
+					{
+						var pType = ParseTypeFull();
+						var pName = (string)Accept(TokenType.Ident).Value;
+
+						method.AddParam(pType, pName);
+
+						while (Check(TokenType.Comma))
+						{
+							Accept();
+							pType = ParseTypeFull();
+							pName = (string)Accept(TokenType.Ident).Value;
+
+							method.AddParam(pType, pName);
+						}
+					}
+
+					Accept(TokenType.ParClose);
+					Accept(TokenType.Semicolon);
+
+					method.EndLine = _curLine;
+					method.EndColumn = _curCol;
+				}
+				else
+				{
+					Accept(TokenType.Semicolon);
+
+					var fieldNode = new FieldNode(type, name);
+					fieldNode.StartLine = startLine;
+					fieldNode.StartColumn = startCol;
+					fieldNode.Docs = doc;
+
+					node.AddMember(fieldNode);
+				}
+			}
+
+			// Take us out of interface namespace
+			PopContext();
+			if (_currentNamespace)
+				_currentNamespace = _currentNamespace.Namespace;
+
+			Accept(TokenType.BraceClose);
+
+			node.EndLine = _curLine;
+			node.EndColumn = _curCol;
+
+			return node;
+		}
+
+		ClassNode ParseClass()
+		{
+			var curCol = _curCol;
+			Accept();
+
+			var startLine = _curLine;
+			var name = (string)Accept(TokenType.Ident).Value;
+
+			var node = new ClassNode(name);
+			node.StartLine = startLine;
+			node.StartColumn = curCol;
+			node.DefinitionEndLine = _curLine;
+			node.DefinitionEndColumn = _curCol;
+			node.Docs = _lastDocComment;
+			_lastDocComment = null;
+
+			AddContext(ParserContext.ClassInfo);
+
+			// Check base class
+			if (Check(TokenType.Colon))
+			{
+				Accept();
+
+				node.BaseClass = ParseType();
+			}
+
+			// Check interfaces
+			if (Check(TokenType.SquareOpen))
+			{
+				Accept();
+
+				node.Implement(ParseType());
+
+				while (Check(TokenType.Comma))
+				{
+					Accept();
+					node.Implement(ParseType());
+				}
+
+				Accept(TokenType.SquareClose);
+			}
+
+			PopContext();
+
+
+			// Members
+			var access = MemberAccess.Public;
+			Accept(TokenType.BraceOpen);
+
+			// Put us into the class namespace
+			AddContext(ParserContext.Class);
+			if (_currentNamespace)
+				_currentNamespace = (Namespace)_currentNamespace.GetSymbolBySignature(name);
+
+
+			while (!Check(TokenType.BraceClose))
+			{
+
+				if (Check(TokenType.K_Public))
+				{
+					Accept();
+					Accept(TokenType.Colon);
+
+					access = MemberAccess.Public;
+				}
+				else if (Check(TokenType.K_Protected))
+				{
+					Accept();
+					Accept(TokenType.Colon);
+
+					access = MemberAccess.Protected;
+				}
+				else if (Check(TokenType.K_Private))
+				{
+					Accept();
+					Accept(TokenType.Colon);
+
+					access = MemberAccess.Private;
+				}
+				else
+					ParseMember(node, access);
+			}
+
+			// Take us out of class namespace
+			PopContext();
+			if (_currentNamespace)
+				_currentNamespace = _currentNamespace.Namespace;
+
+			Accept(TokenType.BraceClose);
+
+			node.EndLine = _curLine;
+			node.EndColumn = _curCol;
+
+			return node;
+		}
+
+		EnumNode ParseEnum()
+		{
+			var curCol = _curCol;
+			Accept();
+
+			var startLine = _curLine;
+			var name = (string)Accept(TokenType.Ident).Value;
+
+			var node = new EnumNode(name);
+			node.StartLine = startLine;
+			node.StartColumn = curCol;
+			node.DefinitionEndLine = _curLine;
+			node.DefinitionEndColumn = _curCol;
+			node.Docs = _lastDocComment;
+			_lastDocComment = null;
+
+			Accept(TokenType.BraceOpen);
+
+			int curValue = 0;
+			while (!Check(TokenType.BraceClose))
+			{
+				var key = (string)Accept(TokenType.Ident).Value;
+				if (Check(OpType.Assign))
+				{
+					Accept();
+					curValue = (int)Accept(TokenType.Int).Value;
+					node.KVPairs[key] = curValue++;
+				}
+				else
+					node.KVPairs[key] = curValue++;
+
+				while (Check(TokenType.Comma))
+				{
+					Accept();
+
+					var key = (string)Accept(TokenType.Ident).Value;
+					if (Check(OpType.Assign))
+					{
+						Accept();
+						curValue = (int)Accept(TokenType.Int).Value;
+						node.KVPairs[key] = curValue++;
+					}
+					else
+						node.KVPairs[key] = curValue++;
+				}
+			}
+
+			Accept(TokenType.BraceClose);
+
+			node.EndLine = _curLine;
+			node.EndColumn = _curCol;
+
+			return node;
+		}
+
+
+		// ------------------------------------------------
+		// Members
+		// ------------------------------------------------
+
+
+		// Hooray for name
+		ServerRenderNode ParseComponentServerRenderMember()
+		{
+			var startLine = _curLine;
+			var startCol = _curCol;
+
+			var renderName = (string)Accept(TokenType.Ident).Value;
+			if (renderName != "Render")
+			{
+				var tmp = _curCol;
+				_curCol = startCol - renderName.Length() - 1;
+				Error("Expected 'Render()' method", _curLine, _curCol + renderName.Length() + 1);
+				_curCol = tmp;
+			}
+
+			var node = new ServerRenderNode();
+			node.Access = MemberAccess.Public;
+			node.StartLine = startLine;
+			node.StartColumn = startCol - renderName.Length() - 1;
+			node.EndLine = _curLine;
+			node.EndColumn = _curCol;
+
+			Accept(TokenType.ParOpen);
+
+			// Parameters
+			if (!Check(TokenType.ParClose))
+			{
+				var pType = ParseTypeFull();
+				var pName = (string)Accept(TokenType.Ident).Value;
+				Accept(OpType.Assign);
+				var pDefault = ParseLiteral();
+
+				node.AddParam(pType, pName, pDefault);
+
+				while (Check(TokenType.Comma))
+				{
+					Accept();
+
+					pType = ParseTypeFull();
+					pName = (string)Accept(TokenType.Ident).Value;
+					Accept(OpType.Assign);
+					pDefault = ParseLiteral();
+
+					node.AddParam(pType, pName, pDefault);
+				}
+			}
+
+			Accept(TokenType.ParClose);
+
+			// Fake check to keep positions right
+			Check();
+
+			AddContext(ParserContext.Member);
+			node.Block = ParseBlock();
+			PopContext();
+
+			return node;
+		}
+
+
+		void ParseMember(ClassNode cls, MemberAccess access)
+		{
+			AddContext(ParserContext.Member);
+
+
+			bool isConstr;
+			bool isStatic = false;
+			bool isVirtual = false;
+
+			var startLine = _curLine;
+			var startCol = _curCol;
+
+
+			// Check if doc comment
+			SymbolDoc docComment = null;
+			if (Check(TokenType.DocComment))
+				docComment = new SymbolDoc((string)Accept().Value);
+
+			// Check if static member
+			if (Check(TokenType.K_Static))
+			{
+				Accept();
+				isStatic = true;
+			}
+			else
+			{
+				if (_inService)
+					Error("All members in a service must be static");
+			}
+
+			// Check if virtual method
+			if (Check(TokenType.K_Virtual))
+			{
+				Accept();
+				isVirtual = true;
+
+				if (_inService)
+					Error("Cannot have virtual members in a service");
+			}
+
+			// Members must start with an identifier or 'new'
+			if (Check(TokenType.Ident) || Check(TokenType.K_New))
+			{
+
+				// Check if constructor
+				if (Check(TokenType.K_New))
+				{
+					Accept();
+					isConstr = true;
+
+					if (isStatic)
+						Error("Cannot have static constructors");
+
+					if (_inService)
+						Error("Services cannot have constructors");
+				}
+
+				TypeNode intr = null;
+				string name;
+
+				// If not constructor, get name and type
+				if (!isConstr)
+				{
+					intr = ParseTypeFull();
+					name = (string)Accept(TokenType.Ident).Value;
+				}
+
+				var endLine = _curLine;
+				var endCol = _curCol;
+
+
+				// If method
+				if (Check(TokenType.ParOpen))
+				{
+					MethodNode node = null;
+					if (isConstr)
+						node = new ConstructorNode();
+					else
+						node = new MethodNode(intr, name);
+
+					cls.AddMember(node);
+					node.Access = access;
+					node.Static = isStatic;
+					node.Virtual = isVirtual;
+					node.StartLine = startLine;
+					node.StartColumn = startCol;
+					node.EndLine = endLine;
+					node.EndColumn = endCol;
+					node.Docs = docComment;
+
+					Accept();
+
+					// Parameters
+					if (!Check(TokenType.ParClose))
+					{
+						bool startDefaults = false;
+						LitExpressionNode defaultValue = null;
+
+						var pType = ParseTypeFull();
+						var pName = (string)Accept(TokenType.Ident).Value;
+						
+						if (Check(OpType.Assign))
+						{
+							Accept();
+							defaultValue = ParseLiteral();
+							startDefaults = true;
+						}
+						node.AddParam(pType, pName, defaultValue);
+
+						while (Check(TokenType.Comma))
+						{
+							Accept();
+
+							pType = ParseTypeFull();
+							pName = (string)Accept(TokenType.Ident).Value;
+							defaultValue = null;
+
+							if (!Check(OpType.Assign))
+							{
+								if (startDefaults)
+									Error("Expected default parameter value for '" + pName + "'");
+							}
+							else
+							{
+								Accept();
+								defaultValue = ParseLiteral();
+								startDefaults = true;
+							}
+
+							node.AddParam(pType, pName, defaultValue);
+						}
+					}
+
+					Accept(TokenType.ParClose);
+
+					if (Check(TokenType.K_Alias))
+					{
+						Accept();
+						node.Aliased = true;
+					}
+
+					// If constructor
+					if (isConstr)
+					{
+						// Cheat a bit with column numbers
+						node.StartColumn -= 4;
+
+						// Check for base call
+						if (Check(TokenType.Colon))
+						{
+							Accept();
+
+							var state = SaveState();
+
+							var constr = (ConstructorNode)node;
+							Accept(TokenType.K_Base);
+
+							var baseCall = new CallExpressionNode("_New");
+							baseCall.SetFromState(state);
+
+							baseCall.ArgList = ParseArgList();
+							constr.BaseCall = baseCall;
+						}
+					}
+
+					// Fake check to keep positions right
+					Check();
+
+					// Set block
+					node.Block = ParseBlock();
+				}
+
+				// If constructor, must be followed by open parenthesis
+				else if (isConstr)
+					Error("Expected '('");
+
+				// If property
+				else if (Check(TokenType.Colon) || Check(TokenType.BraceOpen))
+				{
+					if (isVirtual)
+						Error("Cannot have virtual properties");
+
+					var node = new PropertyNode(intr, name);
+					node.Access = access;
+					node.Static = isStatic;
+					cls.AddMember(node);
+					node.StartLine = startLine;
+					node.StartColumn = startCol;
+					node.Docs = docComment;
+
+
+					if (Check(TokenType.Colon))
+					{
+						Accept();
+
+						MemberAccess fieldAccess = MemberAccess.Public;
+						if (Check(TokenType.K_Public))
+						{
+							Accept();
+							fieldAccess = MemberAccess.Public;
+						}
+						else if (Check(TokenType.K_Protected))
+						{
+							Accept();
+							fieldAccess = MemberAccess.Protected;
+						}
+						else if (Check(TokenType.K_Private))
+						{
+							Accept();
+							fieldAccess = MemberAccess.Private;
+						}
+
+						var fieldName = (string)Accept(TokenType.Ident).Value;
+						node.FieldName = fieldName;
+
+						var field = new FieldNode(intr, fieldName);
+						field.Access = fieldAccess;
+						field.Static = isStatic;
+
+						if (Check(OpType.Assign))
+						{
+							Accept();
+							field.Default = ParseExpression();
+						}
+
+						cls.AddMember(field);
+					}
+
+					Accept(TokenType.BraceOpen);
+
+					if (Check(TokenType.K_Get))
+					{
+						Accept();
+
+						var oldCol = _oldCol;
+						var oldPos = _oldPos;
+						
+						// We need it to be a block so we know where the method is
+						if (Check(TokenType.BraceOpen))
+						{
+							node.Getter = ParseBlock();
+							node.GetterIsBlock = true;
+						}
+						else
+						{
+
+							var block = new BlockNode();
+							block.StartLine = _oldLine;
+							block.StartColumn = _oldCol;
+							block.StartPosition = _oldPos;
+
+							block.AddStatement(ParseStatement());
+
+							block.EndLine = _curLine;
+							block.EndColumn = _curCol;
+							block.EndPosition = _curPos - 1;
+
+							node.Getter = block;
+							node.GetterIsBlock = false;
+						}
+					}
+
+					if (Check(TokenType.K_Set))
+					{
+						Accept();
+
+						var oldCol = _oldCol;
+						var oldPos = _oldPos;
+						
+						// We need it to be a block so we know where the method is
+						if (Check(TokenType.BraceOpen))
+						{
+							node.Setter = ParseBlock();
+							node.SetterIsBlock = true;
+						}
+						else
+						{
+
+							var block = new BlockNode();
+							block.StartLine = _oldLine;
+							block.StartColumn = _oldCol;
+							block.StartPosition = _oldPos;
+
+
+							block.AddStatement(ParseStatement());
+
+							block.EndLine = _curLine;
+							block.EndColumn = _curCol;
+							block.EndPosition = _curPos - 1;
+
+							node.Setter = block;
+							node.SetterIsBlock = false;
+						}
+					}
+
+					Accept(TokenType.BraceClose);
+
+
+					node.EndLine = _curLine;
+					node.EndColumn = _curCol;
+				}
+
+				// If field
+				else
+				{
+					if (isVirtual)
+						Error("Cannot have virtual fields");
+
+					FieldNode node = new FieldNode(intr, name);
+					cls.AddMember(node);
+					node.Access = access;
+					node.Static = isStatic;
+					node.StartLine = startLine;
+					node.StartColumn = startCol;
+					node.EndLine = _curLine;
+					node.EndColumn = _curCol;
+					node.Docs = docComment;
+
+					if (Check(OpType.Assign))
+					{
+						Accept();
+						node.Default = ParseExpression();
+					}
+
+					while (Check(TokenType.Comma))
+					{
+						Accept();
+
+						name = (string)Accept(TokenType.Ident).Value;
+						node = new FieldNode(intr, name);
+						cls.AddMember(node);
+						node.Access = access;
+						node.Static = isStatic;
+
+						if (Check(OpType.Assign))
+						{
+							Accept();
+							node.Default = ParseExpression();
+						}
+					}
+
+					Accept(TokenType.Semicolon);
+				}
+			}
+			else
+				Error("Expected member");
+
+			PopContext();
+		}
+
+
+
+		// ------------------------------------------------
+		// Type parsing
+		// ------------------------------------------------
+
+		TypeNode ParseType()
+		{
+			var startLine = _curLine;
+			var startCol = _curCol;
+
+			if (_typeAlertCb)
+			{
+
+				if (_scope)
+				{
+					if ((_oldLine == _alertLine && _oldCol == _alertColumn) ||
+						(_curLine == _alertLine && _curCol == _alertColumn + 1))
+						this._typeAlertCb(_scope.OwnerMethod.Owner.Namespace, CurrentContext(), true);
+				}
+				else
+				{
+					if ((_oldLine == _alertLine && ((_oldCol == _alertColumn) || (_oldCol == _alertColumn - 1))) ||
+						(_curLine == _alertLine && _curCol == _alertColumn + 1))
+						this._typeAlertCb(_currentNamespace, CurrentContext(), false);
+				}
+
+			}
+
+			string name = (string)Accept(TokenType.Ident).Value;
+
+			if (_typeAlertCb && _curLine == _alertLine && _curCol == _alertColumn + 1)
+			{
+				if (_scope)
+					this._typeAlertCb(_scope.OwnerMethod.Owner.Namespace, CurrentContext(), true);
+				else if (_currentNamespace)
+					this._typeAlertCb(_currentNamespace, CurrentContext(), false);
+			}
+
+			if (name == "map")
+			{
+				TypeNode elem = null;
+				if (Check(OpType.CmpLT))
+				{
+					Accept();
+					elem = ParseTypeFull();
+					Accept(OpType.CmpGT);
+				}
+
+				return new MapTypeNode(elem);
+			}
+			if (name == "array")
+				return new ArrayTypeNode(null);
+
+			else if (name == "function")
+			{
+				var node = new FunctionTypeNode();
+				Accept(OpType.CmpLT);
+
+				if (!Check(OpType.CmpGT))
+				{
+					var paramType = ParseTypeFull();
+					if (Check(TokenType.Ident))
+					{
+						var paramName = (string)Accept(TokenType.Ident).Value;
+						node.AddParam(paramType, paramName);
+					}
+					else
+						node.AddParamType(paramType);
+
+					while (Check(TokenType.Comma))
+					{
+						Accept();
+
+						paramType = ParseTypeFull();
+						if (Check(TokenType.Ident))
+						{
+							var paramName = (string)Accept(TokenType.Ident).Value;
+							node.AddParam(paramType, paramName);
+						}
+						else
+							node.AddParamType(paramType);
+					}
+				}
+
+				Accept(OpType.CmpGT);
+
+				if (Check(TokenType.Colon))
+				{
+					Accept();
+					node.ReturnType = ParseTypeFull();
+				}
+
+				return node;
+			}
+			else if (name == "event")
+			{
+				var node = new EventTypeNode();
+				Accept(OpType.CmpLT);
+
+				if (!Check(OpType.CmpGT))
+				{
+					node.AddParamType(ParseTypeFull());
+
+					while (Check(TokenType.Comma))
+					{
+						Accept();
+
+						node.AddParamType(ParseTypeFull());
+					}
+				}
+
+				Accept(OpType.CmpGT);
+
+				// Getting the type here will register it with the global event-type list which can then be added to the symbol tables
+				if (_scope)
+				{
+					var dummy = _scope.OwnerMethod.Owner.GetType(node);
+				}
+
+				return node;
+			}
+			else if (name == "type")
+			{
+				Accept(TokenType.BraceOpen, false);
+
+				var typeNode = new InlineInterfaceNode();
+
+				var parseMemberNode = function():MemberNode {
+					var memberType = ParseTypeFull();
+					var memberName = (string)Accept(TokenType.Ident).Value;
+
+					MemberNode memberNode;
+
+					if (Check(TokenType.ParOpen))
+					{
+						Accept();
+						var methodNode = new MethodNode(memberType, memberName);
+						memberNode = methodNode;
+
+						int paramCount = 1;
+						if (!Check(TokenType.ParClose))
+						{
+							var paramType = ParseTypeFull();
+							string paramName;
+							if (Check(TokenType.Ident))
+								paramName = (string)Accept(TokenType.Ident).Value;
+							else
+								paramName = "v1";
+
+							methodNode.AddParam(paramType, paramName);
+
+							while (Check(TokenType.Comma))
+							{
+								Accept();
+
+								paramType = ParseTypeFull();
+								if (Check(TokenType.Ident))
+									paramName = (string)Accept(TokenType.Ident).Value;
+								else
+									paramName = "v" + paramCount;
+								paramCount++;
+
+								methodNode.AddParam(paramType, paramName);
+							}
+						}
+
+						Accept(TokenType.ParClose);
+					}
+					else 
+						memberNode = new FieldNode(memberType, memberName);
+
+					Accept(TokenType.Semicolon);
+
+					return memberNode;
+				};
+
+				var member = parseMemberNode();
+				if (member)
+				{
+					typeNode.AddMember(member);
+
+					while (!Check(TokenType.BraceClose))
+					{
+						member = parseMemberNode();
+
+						if (member)
+							typeNode.AddMember(member);
+						else
+						{
+							Find('}');
+							return null;
+						}
+					}
+
+				}
+				else
+				{
+					Find('}');
+					return null;
+				}
+
+				Accept(TokenType.BraceClose);
+
+				return typeNode;
+			}
+
+			var node = new TypeNode(name);
+			node.StartLine = startLine;
+			node.StartColumn = startCol;
+
+			while (Check(TokenType.Dot))
+			{
+				AddContext(ParserContext.Type);
+				Accept();
+				
+				if (_typeAlertCb && _curLine == _alertLine && _curCol == _alertColumn)
+				{
+					if (_scope)
+					{
+						var ns = _scope.OwnerMethod.Owner.GetNamespaceFromTypeNode(node);
+						this._typeAlertCb(ns, CurrentContext(), true);
+					}
+					else if (_currentNamespace)
+					{
+						var ns = _currentNamespace.GetNamespaceFromTypeNode(node);
+						this._typeAlertCb(ns, CurrentContext(), false);
+					}
+				}
+
+				name = (string)Accept(TokenType.Ident).Value;
+				var newNode = new TypeNode(name);
+
+				newNode.Parent = node;
+				newNode.StartLine = node.StartLine;
+				newNode.StartColumn = node.StartColumn;
+				node = newNode;
+
+				PopContext();
+			}
+
+			node.EndLine = _curLine;
+			node.EndColumn = _curCol;
+
+			return node;
+		}
+
+		TypeNode ParseTypeFull()
+		{
+			TypeNode elem = null;
+
+			if (Check(TokenType.ParOpen))
+			{
+				Accept();
+				elem = ParseTypeFull();
+				Accept(TokenType.ParClose);
+			}
+			else
+				elem = ParseType();
+
+			if (Check(TokenType.SquareOpen))
+			{
+				Accept();
+				var node = new ArrayTypeNode(elem);
+				Accept(TokenType.SquareClose);
+
+				while (Check(TokenType.SquareOpen))
+				{
+					Accept();
+					node = new ArrayTypeNode(node);
+					Accept(TokenType.SquareClose);
+				}
+
+				return node;
+			}
+			else
+				return elem;
+		}
+
+
+
+		// ------------------------------------------------
+		// Statement parsing
+		// ------------------------------------------------
+
+
+		StatementNode ParseStatement()
+		{
+			try
+			{
+				var state = SaveState();
+				var oldPos = _oldPos;
+				var oldLineStart = _lineStart;
+
+				var token = Check();
+
+				if (!token)
+					Error("Unexpected end of file");
+
+				//if (!token) :debugger;
+				switch (token.Type)
+				{
+					case TokenType.Semicolon:
+					{
+						Accept();
+						return new ExpressionNode();
+					}
+
+					case TokenType.K_If:
+					{
+						Accept();
+						var ifStatement = new IfNode();
+						Accept(TokenType.ParOpen, false);
+						ifStatement.Condition = ParseExpression();
+						Accept(TokenType.ParClose, false);
+
+						ifStatement.Then = ParseStatement();
+
+						if (Check(TokenType.K_Else))
+						{
+							Accept();
+							ifStatement.Else = ParseStatement();
+						}
+
+						ifStatement.SetFromState(state);
+						return ifStatement;
+					}
+
+					case TokenType.K_While:
+					{
+						Accept();
+
+						var whileLoop = new WhileNode();
+
+						Accept(TokenType.ParOpen, false);
+						whileLoop.Condition = ParseExpression();
+						Accept(TokenType.ParClose, false);
+
+						whileLoop.Statement = ParseStatement();
+
+						whileLoop.SetFromState(state);
+						return whileLoop;
+					}
+
+					case TokenType.K_For:
+					{
+						Accept();
+
+						var forLoop = new ForNode();
+
+						Accept(TokenType.ParOpen, false);
+
+						forLoop.Init = ParseStatement();
+						forLoop.Condition = ParseExpression();
+
+						Accept(TokenType.Semicolon, false);
+
+						forLoop.Update = ParseExpression();
+
+						Accept(TokenType.ParClose, false);
+
+						forLoop.Statement = ParseStatement();
+
+						forLoop.SetFromState(state);
+						return forLoop;
+					}
+
+					case TokenType.K_Foreach:
+					{
+						Accept();
+
+						var forLoop = new ForeachNode();
+
+						Accept(TokenType.ParOpen, false);
+						TypeNode iterType;
+						if (Check(TokenType.K_Var))
+						{
+							Accept();
+							iterType = TypeNode.VarType;
+						}
+						else
+							iterType = ParseTypeFull();
+
+						string iterName = (string)Accept(TokenType.Ident).Value;
+
+						TypeNode iterType2 = null;
+						string iterName2 = "";
+						if (Check(TokenType.Comma))
+						{
+							Accept();
+
+							if (Check(TokenType.K_Var))
+							{
+								Accept();
+								iterType2 = TypeNode.VarType;
+							}
+							else
+								iterType2 = ParseTypeFull();
+
+							iterName2 = (string)Accept(TokenType.Ident).Value;
+						}
+
+						Accept(TokenType.K_In, false);
+
+						var collection = ParseExpression();
+						Accept(TokenType.ParClose, false);
+
+						AddScope();
+
+						if (_scope)
+						{
+							if (iterType == TypeNode.VarType)
+							{
+								var collectionType = collection.GetTypeOf(_scope);
+								if (collectionType)
+								{
+									if (collectionType.IsArray())
+									{
+										var collectionArray = (ArrayType)collectionType;
+
+										_scope.AddItem(collectionArray.Elem, iterName);
+									}
+									else if (collectionType.IsMap())
+									{
+										var collectionMap = (MapType)collectionType;
+
+										_scope.AddItem(Interface.StringType, iterName);
+									}
+								}
+							}
+							else
+							{
+								var actualIterType = _scope.OwnerMethod.Owner.GetType(iterType);
+								_scope.AddItem(actualIterType, iterName);
+							}
+
+							if (iterType2)
+							{
+								if (iterType2 == TypeNode.VarType)
+								{
+									var collectionType = collection.GetTypeOf(_scope);
+
+									if (collectionType.IsMap())
+									{
+										var collectionMap = (MapType)collectionType;
+
+										_scope.AddItem(collectionMap.Elem, iterName2);
+									}
+								}
+								else
+								{
+									var actualIterType = _scope.OwnerMethod.Owner.GetType(iterType2);
+									_scope.AddItem(actualIterType, iterName2);
+								}
+							}
+						}
+
+						var stmt = ParseStatement();
+
+						PopScope();
+
+						forLoop.IteratorType = iterType;
+						forLoop.IteratorName = iterName;
+						forLoop.IteratorType2 = iterType2;
+						forLoop.IteratorName2 = iterName2;
+						forLoop.Collection = collection;
+						forLoop.Statement = stmt;
+
+						forLoop.SetFromState(state);
+						return forLoop;
+					}
+
+
+					case TokenType.K_Break:
+					{
+						Accept();
+						var brk = new BreakNode();
+						Accept(TokenType.Semicolon, false);
+						brk.SetFromState(state);
+						return brk;
+					}
+					case TokenType.K_Continue:
+					{
+						Accept();
+						var cnt = new ContinueNode();
+						Accept(TokenType.Semicolon, false);
+						cnt.SetFromState(state);
+						return cnt;
+					}
+
+					case TokenType.AsmStr:
+					{
+						var state = SaveState();
+						
+						var asmToken = (TokenAsm)Accept();
+
+						var code = (string)asmToken.Value;
+
+						var stmt = new AssemblyNode();
+						stmt.SetFromState(state);
+
+						stmt.Code = code;
+						foreach (var target in asmToken.Targets)
+							stmt.AddTarget(target);
+
+						stmt.SetFromState(state);
+						return stmt;
+					}
+
+					case TokenType.K_Target:
+					{
+						Accept();
+						var state = SaveState();
+
+						var targetNode = new TargetNode();
+						targetNode.SetFromState(state);
+
+						var target = (string)Accept(TokenType.Ident).Value;
+						targetNode.AddTarget(target);
+
+						while (Check(TokenType.Comma))
+						{
+							Accept();
+
+							target = (string)Accept(TokenType.Ident).Value;
+							targetNode.AddTarget(target);
+						}
+
+						targetNode.Block = ParseBlock();
+						targetNode.SetFromState(state);
+
+						return targetNode;
+					}
+
+					case TokenType.K_Try:
+					{
+						Accept();
+						var tryCatch = new TryCatchNode();
+						tryCatch.TryBlock = ParseBlock();
+
+						Accept(TokenType.K_Catch);
+						Accept(TokenType.ParOpen, false);
+
+						tryCatch.CatchType = ParseType();
+						tryCatch.CatchName = (string)Accept(TokenType.Ident).Value;
+						Accept(TokenType.ParClose, false);
+
+						if (_scope)
+						{
+							AddScope();
+							_scope.AddItem(_scope.OwnerMethod.Owner.GetType(tryCatch.CatchType), tryCatch.CatchName);
+						}
+
+						tryCatch.CatchBlock = ParseBlock();
+
+						if (_scope)
+							PopScope();
+
+						tryCatch.SetFromState(state);
+						return tryCatch;
+					}
+
+					case TokenType.K_Throw:
+					{
+						Accept();
+
+						var throwNode = new ThrowNode();
+						throwNode.Expression = ParseExpression();
+						Accept(TokenType.Semicolon, false);
+
+						throwNode.SetFromState(state);
+						return throwNode;
+					}
+
+
+					case TokenType.K_Switch:
+					{
+						Accept();
+
+						var switchNode = new SwitchCaseNode();
+
+						Accept(TokenType.ParOpen, false);
+						switchNode.Value = ParseExpression();
+						Accept(TokenType.ParClose, false);
+
+						Accept(TokenType.BraceOpen, false);
+						AddScope();
+
+						while (Check(TokenType.K_Case))
+						{
+							Accept();
+
+							var caseNode = new CaseNode();
+							switchNode.AddCase(caseNode);
+
+							caseNode.Value = ParseExpression();
+							Accept(TokenType.Colon, false);
+
+							var check = Check();
+							while (check.Type != TokenType.K_Case && check.Type != TokenType.K_Default && check.Type != TokenType.BraceClose)
+							{
+								caseNode.AddStatement(ParseStatement());
+								check = Check();
+							}
+
+							if (Check(TokenType.K_Default))
+							{
+								Accept();
+								Accept(TokenType.Colon, false);
+
+								var defaultNode = new DefaultNode();
+								switchNode.DefaultCase = defaultNode;
+
+								var check = Check();
+								while (check.Type != TokenType.BraceClose)
+								{
+									defaultNode.AddStatement(ParseStatement());
+									check = Check();
+								}
+							}
+						}
+
+						PopScope();
+						Accept(TokenType.BraceClose, false);
+
+						switchNode.SetFromState(state);
+						return switchNode;
+					}
+
+					case TokenType.BraceOpen:
+					{
+						AddScope();
+						var block = ParseBlock();
+						PopScope();
+
+						return block;
+					}
+
+					case TokenType.K_Return:
+					{
+						Accept();
+
+						var ret = new ReturnNode();
+						ret.SetFromState(state);
+
+						if (!Check(TokenType.Semicolon))
+							ret.ReturnValue = ParseExpression();
+
+						Accept(TokenType.Semicolon, false);
+
+						return ret;
+					}
+
+					case TokenType.K_Var:
+					{
+						Accept();
+
+						var curPos = _curPos;
+						var curLine = _curLine;
+						var curCol = _curCol;
+
+						var name = (string)Accept(TokenType.Ident).Value;
+
+						var decl = new VarDeclNode(name);
+						decl.SetFromState(state);
+						decl.StartLine = curLine;
+						decl.StartColumn = curCol;
+						decl.StartPosition = curPos;
+						decl.EndLine = _curLine;
+						decl.EndColumn = _curCol;
+						decl.EndPosition = _curPos;
+
+						decl.VarType = TypeNode.VarType;
+
+						Accept(OpType.Assign, false);
+
+						decl.Expr = ParseExpression();
+
+						Accept(TokenType.Semicolon, false);
+
+						if (_scope)
+							_scope.AddItem(decl.Expr.GetTypeOf(_scope), name);
+
+						return decl;
+					}
+
+
+					case TokenType.K_Await:
+					{
+						Accept();
+
+						var oldState = SaveOldState();
+						var state = SaveState();
+						var responder = new TypeNode((string)Accept(TokenType.Ident).Value);
+						responder.SetFromState(state);
+
+						while (Check(TokenType.Dot))
+						{
+							Accept();
+
+							state = SaveState();
+							var newResponder = new TypeNode((string)Accept(TokenType.Ident).Value);
+							newResponder.Parent = responder;
+
+							responder = newResponder;
+							responder.SetFromState(state);
+						}
+
+						var awaitNode = new AwaitNode();
+						awaitNode.Responder = responder;
+						awaitNode.SetFromState(oldState);
+
+						Accept(TokenType.ParOpen);
+
+						if (!Check(TokenType.ParClose))
+						{
+							awaitNode.ArgList.Add(ParseExpression());
+
+							while (Check(TokenType.Comma))
+							{
+								Accept();
+
+								awaitNode.ArgList.Add(ParseExpression());
+							}
+						}
+
+						Accept(TokenType.ParClose);
+
+						Accept(TokenType.SquareOpen);
+
+						awaitNode.ResultType = ParseTypeFull();
+						awaitNode.ResultVarName = (string)Accept(TokenType.Ident).Value;
+
+						if (Check(TokenType.Comma))
+						{
+							Accept();
+
+							awaitNode.StatusVarName = (string)Accept(TokenType.Ident).Value;
+						}
+
+						Accept(TokenType.SquareClose);
+
+						awaitNode.Block = ParseBlock();
+
+
+						return awaitNode;
+					}
+
+
+					// Try to parse a type. If it doesn't work then run-over into expression parsing
+					// Types may be in parentheses, e.g. (function<>:string)[]
+					// Doesn't apply to inline interfaces
+					case TokenType.ParOpen:
+					case TokenType.Ident:
+					{
+						try
+						{
+							var type = ParseTypeFull();
+
+							var varState = SaveState();
+							var name = (string)Accept(TokenType.Ident).Value;
+
+							var decl = new VarDeclNode(name);
+							decl.SetFromState(varState);
+
+							decl.VarType = type;
+
+							if (Check(OpType.Assign))
+							{
+								Accept();
+
+								try
+								{
+									decl.Expr = ParseExpression();
+								}
+								catch (ParserError e)
+								{
+									Find(';');
+								}
+							}
+
+							Accept(TokenType.Semicolon);
+
+							if (_scope)
+								_scope.AddItem(_scope.OwnerMethod.Owner.GetType(type), name);
+
+							return decl;
+						}
+						catch (ParserError e)
+						{
+							RestoreState(state);
+							Revert(oldPos);
+							_lineStart = oldLineStart;
+						}
+					}
+
+					default:
+					{
+						var expr = ParseExpression();
+						Accept(TokenType.Semicolon, false);
+
+						return expr;
+					}
+
+				}
+			}
+			catch (object err)
+			{
+				throw err;
+				//if (Search(TokenType.Semicolon, TokenType.BraceClose))
+				//	Accept();
+			}
+
+			return null;
+		}
+
+
+		BlockNode ParseBlock()
+		{
+			var oldCol = _curCol;
+			var oldPos = _curPos;
+
+			Accept(TokenType.BraceOpen);
+
+			var node = new BlockNode();
+			node.StartLine = _oldLine;
+			node.StartColumn = oldCol + 1;
+			node.StartPosition = oldPos;
+
+
+			while (!Check(TokenType.BraceClose))
+				node.AddStatement(ParseStatement());
+
+
+			Accept(TokenType.BraceClose);
+			node.EndLine = _curLine;
+			node.EndColumn = _curCol;
+			node.EndPosition = _curPos - 1;
+
+
+			return node;
+		}
+
+
+
+
+		// ------------------------------------------------
+		// Expression parsing
+		// ------------------------------------------------
+
+
+		LitExpressionNode ParseLiteral()
+		{
+			var state = SaveState();
+			var token = Check();
+
+			switch (token.Type)
+			{
+				case TokenType.K_This:
+				case TokenType.K_True:
+				case TokenType.K_False:
+				case TokenType.K_Null:
+				case TokenType.Char:
+				case TokenType.Int:
+				case TokenType.Float:
+				case TokenType.String:
+				{
+					var expr = new LitExpressionNode(Accept());
+					expr.SetFromState(state);
+
+					return expr;
+				}
+
+				default:
+					Error("Expected literal value");
+			}
+
+			return null;
+		}
+
+
+		// Parse expression and check for conditional
+		ExpressionNode ParseExpression()
+		{
+			var value = ParseExpression2();
+
+			// Check for conditional
+			if (Check(OpType.Cond))
+			{
+				Accept();
+				var state = SaveState();
+
+				var cond = new CondOpExpressionNode();
+				cond.SetFromState(state);
+
+				cond.Expression1 = value;
+				cond.Expression2 = ParseExpression();
+				Accept(TokenType.Colon);
+				cond.Expression3 = ParseExpression();
+
+				value = cond;
+			}
+
+			return value;
+		}
+
+		// Parse expression but ignore conditionals
+		ExpressionNode ParseExpression2()
+		{
+			var value = ParseValue();
+
+			var state = SaveOldState();
+
+			TokenOp op = null;
+			ExpressionNode subExpr = null;
+			OperatorExpressionNode opNode = null;
+
+
+			// Parse operator if it isn't a conditional
+			if (Check(TokenType.Operator))
+			{
+				var op = (TokenOp)Check();
+				if (op.Op != OpType.Cond)
+				{
+					op = (TokenOp)Accept();
+
+					opNode = new OperatorExpressionNode(op.Op);
+					opNode.SetFromState(state);
+
+					opNode.Expression1 = value;
+					subExpr = ParseExpression2();
+					opNode.Expression2 = subExpr;
+
+					value = opNode;
+				}
+			}
+
+
+			// Apply precedence
+			if (subExpr && subExpr.ExprType == ExpressionType.Op)
+			{
+				var opSub = (OperatorExpressionNode)subExpr;
+
+				if (opNode.Operator < opSub.Operator)
+				{
+					var move = opSub.Expression1;
+
+					opNode.Expression2 = move;
+					opSub.Expression1 = opNode;
+
+					value = subExpr;
+				}
+			}
+
+			return value;
+
+		}
+
+
+		ExpressionNode ParseValue()
+		{
+			bool isNative = false;
+			bool supportsNative = false;
+
+			var token = Check();
+			var oldState = SaveOldState();
+			var state = SaveOldState();
+
+			if (!token) Error("Reached end of file", oldState);
+
+
+			// Prefix operator
+			if (token.Type == TokenType.Operator)
+			{
+				var op = (TokenOp)token;
+
+				if (op.IsPreOp())
+				{
+					Accept();
+
+					var preop = new PreOpExpressionNode(op.Op, ParseValue());
+					preop.SetFromState(state);
+
+					return preop;
+				}
+				else if (op.Op == OpType.CmpLT)
+				{
+					return ParseHTML();
+				}
+			}
+
+
+			// Check if native
+			if (token.Type == TokenType.Colon)
+			{
+				Accept();
+				isNative = true;
+
+				token = Check();
+			}
+
+
+			ExpressionNode expr = null;
+
+			switch (token.Type)
+			{
+				case TokenType.K_This:
+				{
+					Accept();
+
+					if (isNative)
+					{
+						supportsNative = true;
+						expr = new LoadExpressionNode("this");
+						((LoadExpressionNode)expr).IsNative = true;
+						expr.SetFromState(state);
+					}
+					else
+					{
+						expr = new LoadExpressionNode("this");
+						expr.SetFromState(state);
+					}
+					break;
+				}
+
+
+				case TokenType.K_True:
+				case TokenType.K_False:
+				case TokenType.K_Null:
+				case TokenType.Char:
+				case TokenType.Int:
+				case TokenType.Float:
+				{
+					expr = new LitExpressionNode(Accept());
+					expr.SetFromState(state);
+
+					break;
+				}
+
+				case TokenType.String:
+				{
+					return FormatString(Accept());
+				}
+
+
+				case TokenType.ParOpen:
+				{
+					Accept();
+					int oldPos= _oldPos;
+
+					try
+					{
+						var toType = ParseTypeFull();
+						Accept(TokenType.ParClose);
+
+						var typecast = ParseValue();
+
+						expr = new TypecastExpressionNode(toType, typecast);
+						expr.SetFromState(state);
+					}
+					catch (ParserError e)
+					{
+						Revert(oldPos);
+
+						expr = new ParExpressionNode(ParseExpression());
+						expr.SetFromState(state);
+
+						Accept(TokenType.ParClose);
+					}
+
+					break;
+				}
+
+
+				case TokenType.K_Base:
+				{
+					Accept();
+					Accept(TokenType.Dot);
+
+					if (_dotAccessAlertCb && _scope)
+					{
+						if ((_curLine == _alertLine) && (_curCol == _alertColumn))
+						{
+							//var type = expr.GetTypeOf(_scope, this);
+							var type = _scope.OwnerMethod.Owner;
+							if (type)
+								this._dotAccessAlertCb(type);
+						}
+					}
+
+					var name = (string)Accept(TokenType.Ident).Value;
+
+					expr = new BaseCallExpressionNode(name);
+					expr.SetFromState(state);
+
+					((CallExpressionNode)expr).ArgList = ParseArgList();
+
+					break;
+				}
+
+
+				case TokenType.Ident:
+				{
+					var varName = (string)Accept(TokenType.Ident).Value;
+
+					if (varName == "function")
+					{
+						expr = new FunctionExpressionNode();
+						var funcExpr = (FunctionExpressionNode)expr;
+						funcExpr.SetFromState(state);
+
+						AddScope();
+
+						Accept(TokenType.ParOpen);
+
+						if (!Check(TokenType.ParClose))
+						{
+							var intr = ParseTypeFull();
+							var name = (string)Accept(TokenType.Ident).Value;
+							funcExpr.AddParam(intr, name);
+
+							if (_scope)
+								_scope.AddItem(_scope.OwnerMethod.Owner.GetType(intr), name);
+
+							while (Check(TokenType.Comma))
+							{
+								Accept();
+
+								intr = ParseTypeFull();
+								name = (string)Accept(TokenType.Ident).Value;
+								funcExpr.AddParam(intr, name);
+
+								if (_scope)
+									_scope.AddItem(_scope.OwnerMethod.Owner.GetType(intr), name);
+							}
+						}
+
+						Accept(TokenType.ParClose);
+
+						// Return type
+						if (Check(TokenType.Colon))
+						{
+							Accept();
+							funcExpr.ReturnType = ParseTypeFull();
+						}
+
+						// Fake check to keep positions right
+						Check();
+
+						funcExpr.Block = ParseBlock();
+
+						PopScope();
+					}
+					else
+					{
+						supportsNative = true;
+
+						if (_scope)
+						{
+							if (_curLine == _alertLine && _curCol == _alertColumn + 1)
+							{
+								if (_loadAlertCb)
+									this._loadAlertCb(_scope.GetItemsStartingWith(varName));
+
+
+								if (_loadMemberlertCb)
+									this._loadMemberlertCb(_scope.OwnerMethod.Owner.GetAllMembers());
+
+								if (_typeAlertCb)
+								{
+									AddContext(ParserContext.Member);
+									this._typeAlertCb(_scope.OwnerMethod.Owner.Namespace, CurrentContext(), false);
+									PopContext();
+								}
+							}
+						}
+
+						if (Check(TokenType.ParOpen))
+						{
+							expr = new CallExpressionNode(varName);
+							((CallExpressionNode)expr).IsNative = isNative;
+							expr.SetFromState(state);
+
+							((CallExpressionNode)expr).ArgList = ParseArgList();
+
+						}
+						else
+						{
+							expr = new LoadExpressionNode(varName);
+							((LoadExpressionNode)expr).IsNative = isNative;
+							expr.SetFromState(state);
+						}
+					}
+
+					break;
+				}
+
+
+				case TokenType.K_New:
+				{
+					Accept();
+					AddContext(ParserContext.New);
+
+					bool newIsNative = false;
+					if (Check(TokenType.Colon))
+					{
+						Accept();
+						newIsNative = true;
+					}
+
+					var newType = ParseTypeFull();
+					expr = new NewExpressionNode(newType);
+					expr.SetFromState(state);
+					((NewExpressionNode)expr).IsNative = newIsNative;
+
+					if (Check(TokenType.ParOpen))
+						((NewExpressionNode)expr).ArgList = ParseArgList();
+
+					PopContext();
+
+					break;
+				}
+
+				case TokenType.SquareOpen:
+				{
+					Accept();
+
+					var litArray = new LitArrayExpressionNode();
+					expr = litArray;
+					expr.SetFromState(state);
+
+					if (!Check(TokenType.SquareClose))
+					{
+						litArray.Items.Add(ParseExpression());
+
+						while (Check(TokenType.Comma))
+						{
+							Accept();
+
+							litArray.Items.Add(ParseExpression());
+						}
+					}
+
+					Accept(TokenType.SquareClose);
+
+					break;
+				}
+
+				case TokenType.BraceOpen:
+				{
+					Accept();
+
+					var litMap = new LitMapExpressionNode();
+					expr = litMap;
+					expr.SetFromState(state);
+
+					if (!Check(TokenType.BraceClose))
+					{
+						//var key = (string)Accept(TokenType.Ident).Value;
+						string key;
+						if (Check(TokenType.Ident))
+							key = (string)Accept(TokenType.Ident).Value;
+						else if (Check(TokenType.String))
+						{
+							var tkey = Accept(TokenType.String).Value;
+							tkey = tkey.substr(1, tkey.length - 2);
+							key = (string)tkey;
+						}
+						else if (Check())
+							Error("Unexpected token '" + Token.GetTokenName(Check().Type) + "', expected identifier or string");
+						else
+							Error("Unexpected token. Expected identifier or string");
+
+						Accept(TokenType.Colon);
+						var value = ParseExpression();
+
+						litMap.Items[key] = value;
+
+						while (Check(TokenType.Comma))
+						{
+							Accept();
+
+							//key = (string)Accept(TokenType.Ident).Value;
+							if (Check(TokenType.Ident))
+								key = (string)Accept(TokenType.Ident).Value;
+							else if (Check(TokenType.String))
+							{
+								var tkey = Accept(TokenType.String).Value;
+								tkey = tkey.substr(1, tkey.length - 2);
+								key = (string)tkey;
+							}
+							else if (Check())
+								Error("Unexpected token '" + Token.GetTokenName(Check().Type) + "', expected identifier or string");
+							else
+								Error("Unexpected token. Expected identifier or string");
+
+							Accept(TokenType.Colon);
+							value = ParseExpression();
+
+							litMap.Items[key] = value;
+						}
+					}
+
+					Accept(TokenType.BraceClose);
+					break;
+				}
+
+				case TokenType.AsmStr:
+				{
+					expr = new AssemblyExpressionNode((string)Accept().Value);
+					expr.SetFromState(state);
+
+					break;
+				}
+
+
+				default:
+				{
+					RestoreState(oldState);
+
+					Error("Unexpected token '" + Token.GetTokenName(token.Type) + "'. Expected value", state);
+				}
+			}
+
+
+			if (isNative && !supportsNative)
+				Error("Illegal native expression", state);
+
+
+			// Field access, array access, complex calls
+			while (Check(TokenType.Dot) || Check(TokenType.SquareOpen) || Check(TokenType.ParOpen))
+			{
+				if (Check(TokenType.Dot))
+				{
+					var dot = Accept();
+
+					// Create alerts
+					if (_dotAccessAlertCb && _scope)
+					{
+						if ((_curLine == _alertLine) && (_curCol == _alertColumn))
+						{
+							var type = expr.GetTypeOf(_scope, this);
+							if (type)
+								this._dotAccessAlertCb(type);
+						}
+					}
+					if (_typeAlertCb && _scope)
+					{
+						if (_scope && _curLine == _alertLine && _curCol == _alertColumn)
+						{
+							var typeNode = TypeNode.Generate(expr.GenerateTypeString());
+							var ns = _scope.OwnerMethod.Owner.GetNamespaceFromTypeNode(typeNode);
+
+							if (ns)
+							{
+								AddContext(ParserContext.Type);
+								this._typeAlertCb(ns, CurrentContext(), false);
+								PopContext();
+							}
+						}
+					}
+
+					state = SaveState();
+
+					// If token is keyword, turn it into identifier
+					var token = Accept();
+					if (token.Type != TokenType.Ident)
+					{
+						if (token.Type >= TokenType.KW_Start && token.Type <= TokenType.KW_End)
+							token = new Token(TokenType.Ident, Token.GetTokenName(token.Type));
+						else
+							Error("Expected identifier", state);
+					}
+
+					var name = (string)token.Value;
+
+					if (Check(TokenType.ParOpen))
+					{
+						var call = new CallExpressionNode(name);
+						call.SetFromState(state);
+
+						var methodCall = new MethodCallExpressionNode(expr, call);
+
+						call.ArgList = ParseArgList();
+
+						expr = methodCall;
+					}
+					else
+					{
+						var acc = new AccessExpressionNode(expr, name);
+						acc.SetFromState(state);
+						expr = acc;
+					}
+
+					expr.SetFromState(state);
+				}
+				else if (Check(TokenType.SquareOpen))
+				{
+					Accept();
+					var index = ParseExpression();
+					Accept(TokenType.SquareClose);
+
+					var access = new ArrayAccessExpressionNode(expr, index);
+					expr = access;
+				}
+				else if (Check(TokenType.ParOpen))
+				{
+					var call = new ComplexCallExpressionNode(expr);
+					call.SetFromState(state);
+
+					call.ArgList = ParseArgList();
+					expr = call;
+				}
+			}
+
+
+			// Postfix operators
+			token = Check(TokenType.Operator);
+			if (token)
+			{
+				var op = (TokenOp)token;
+
+				if (op.IsPostOp())
+				{
+					state = SaveState();
+					Accept();
+
+					var postOp = new PostOpExpressionNode(op.Op, expr);
+					postOp.SetFromState(state);
+
+					return postOp;
+				}
+			}
+
+			return expr;
+		}
+
+
+		ExpressionNode[] ParseArgList()
+		{
+			ExpressionNode[] args = [];
+
+			Accept(TokenType.ParOpen);
+
+			if (!Check(TokenType.ParClose))
+			{
+				args.Add(ParseExpression());
+
+				while (Check(TokenType.Comma))
+				{
+					Accept();
+
+					args.Add(ParseExpression());
+				}
+			}
+
+			Accept(TokenType.ParClose);
+
+			return args;
+		}
+
+		HTMLExpressionNode ParseHTML()
+		{
+			var state = SaveState();
+			Accept();
+
+			HTMLExpressionNode html = null;
+			TypeNode elemType;
+			bool isExprType = false;
+			if (Check(TokenType.Ident))
+			{
+				elemType = ParseType(); //(string)Accept(TokenType.Ident).Value;
+				html = new HTMLExpressionNode(elemType);
+			}
+			else if (Check(TokenType.SquareOpen))
+			{
+				Accept();
+				isExprType = true;
+				html = new HTMLExpressionNode(ParseExpression());
+				Accept(TokenType.SquareClose);
+			}
+			else
+				Error("Unexpected token '" + Token.GetTokenName(Check().Type) + "'. Expected HTML element");
+
+			html.SetFromState(state);
+
+			int curPos = GetCurPos();
+
+			if (!Check(OpType.CmpGT))
+			{
+				bool foundClone = false;
+
+				while (Check(TokenType.Ident) || Check(TokenType.String) || Check(TokenType.K_Class) || Check(TokenType.K_For) || Check(TokenType.BraceOpen))
+				{
+					if (Check(TokenType.BraceOpen))
+					{
+						if (foundClone)
+							Error("Element already has attribute clone");
+						else
+						{
+							foundClone = true;
+							Accept();
+							html.AttributeClone = ParseExpression();
+							Accept(TokenType.BraceClose);
+							curPos = GetCurPos();
+						}
+					}
+					else
+					{
+						string key = "";
+
+						if (Check(TokenType.Ident))
+						{
+							Revert(GetCurPos() - ((string)Check().Value).Length());
+							key = (string)AcceptHTMLAttr().Value;
+						}
+						else if (Check(TokenType.String))
+							key = (string)Accept().Value;
+						else if (Check(TokenType.K_Class))
+						{
+							Accept();
+							key = "class";
+						}
+						else if (Check(TokenType.K_For))
+						{
+							Accept();
+							key = "for";
+						}
+
+						Accept(OpType.Assign);
+
+						// Can only parse values because
+						// <div class="row">
+						// the '"row" >' is interpreted as part of an expression
+						var value = ParseValue();
+
+						curPos = GetCurPos();
+
+						if (key == "styling")
+						{
+							if (value.ExprType != ExpressionType.Lit || ((LitExpressionNode)value).Literal.Type != TokenType.String)
+								Error("Element styling attribute must be literal string", value);
+							else
+								html.Attributes[key] = new LitExpressionNode(new Token(TokenType.String, "\"_est" + Namespace.AddStyling((string)((LitExpressionNode)value).Literal.Value) + "\""));
+						}
+						else if (key == "style")
+						{
+							if (value.ExprType != ExpressionType.Lit || ((LitExpressionNode)value).Literal.Type != TokenType.String)
+								html.Attributes[key] = value;
+							else
+							{
+								html.Attributes["styling"] = new LitExpressionNode(new Token(TokenType.String, "\"_est" + Namespace.AddStyling((string)((LitExpressionNode)value).Literal.Value) + "\""));
+							}
+						}
+						else
+							html.Attributes[key] = value;
+					}
+				}
+			}
+
+			if (Check(OpType.CmpGT))
+			{
+				Accept();
+
+				curPos = GetCurPos();
+				int curLine = GetCurLine();
+
+				while (HasNext() && !Check(TokenType.MClose))
+				{
+					if (Check(OpType.CmpLT))
+					{
+						html.AddChild(ParseHTML());
+						curPos = GetCurPos();
+						curLine = GetCurLine();
+					}
+					else if (Check(TokenType.BraceOpen))
+					{
+						Accept();
+						var val = ParseExpression();
+						Accept(TokenType.BraceClose);
+
+						var code = new HTMLCodeExpressionNode(val);
+						html.AddChild(code);
+					}
+					else
+					{
+						Revert(curPos);
+						SetCurLine(curLine);
+
+						var val = FormatString(AcceptHTMLText());
+						curPos = GetCurPos() + 1;
+						curLine = GetCurLine();
+
+						var text = new HTMLTextExpressionNode(val);
+
+						html.AddChild(text);
+					}
+				}
+
+				Accept(TokenType.MClose);
+
+				if (!isExprType)
+				{
+					if ((string)Accept(TokenType.Ident).Value != elemType.Name)
+						Error("Expected </" + elemType.Name + ">");
+				}
+
+				Accept(OpType.CmpGT);
+			}
+			else
+			{
+				Accept(TokenType.MSelfClose);
+			}
+
+			return html;
+		}
+
+
+		ExpressionNode FormatString(Token input)
+		{
+			var str = (string)input.Value;
+			string[] vars = [];
+			string variable;
+			string nstr;
+			bool invar = false;
+
+			for (int c = 0; c < str.Length(); c++)
+			{
+				if (!invar)
+				{
+					if (c < str.Length() - 2)
+					{
+						if (str[c] == '$' && str[c + 1] == '{')
+						{
+							invar = true;
+							nstr += "%{";
+							c++;
+							continue;
+						}
+					}
+
+					nstr += str[c];
+				}
+				else
+				{
+					if (str[c] == '}')
+					{
+						nstr += ("" + vars.Length());
+						nstr += "}";
+						invar = false;
+						vars.Add(variable);
+						variable = "";
+					}
+					else
+						variable += str[c];
+				}
+			}
+
+			if (vars.Length() == 0)
+			{
+				return new LitExpressionNode(input);
+			}
+			else
+			{
+				var stringLiteral = new LitExpressionNode(new Token(TokenType.String, nstr));
+
+				var formatCall = new CallExpressionNode("Format");
+				var args = new LitArrayExpressionNode();
+				formatCall.ArgList.Add(args);
+
+				foreach (var arg in vars)
+					args.Items.Add(new TypecastExpressionNode(TypeNode.Generate("string"), CreateLoadExpression(arg)));
+
+				return new MethodCallExpressionNode(stringLiteral, formatCall);
+			}
+
+		}
+
+
+		ExpressionNode CreateLoadExpression(string input)
+		{
+			bool hasDot = false;
+			foreach (var c in input)
+			{
+				if (c == '.')
+				{
+					hasDot = true;
+					break;
+				}
+			}
+
+			if (hasDot)
+			{
+				string[] tokens = [];
+				string token;
+
+				foreach (var c in input)
+				{
+					if (c == '.')
+					{
+						tokens.Add(token);
+						token = "";
+					}
+					else
+						token += c;
+				}
+				tokens.Add(token);
+
+				ExpressionNode expr = new LoadExpressionNode(tokens[0]);
+
+				for (int t = 1; t < tokens.Length(); t++)
+				{
+					var access = new AccessExpressionNode(expr, tokens[t]);
+					expr = access;
+				}
+
+				return expr;
+			}
+			else
+				return new LoadExpressionNode(input);
+		}
+
+
+
+		// ------------------------------------------------
+		// Scopes
+		// ------------------------------------------------
+
+		void AddScope()
+		{
+			if (_scope)
+				_scope = new Scope(_scope.OwnerMethod, _scope);
+		}
+
+		void PopScope()
+		{
+			if (_scope)
+				_scope = _scope.Parent;
+		}
+
+
+
+	private:
+		int _alertLine;
+		int _alertColumn;
+		
+		function<Interface> 						_dotAccessAlertCb;
+		function<Namespace, ParserContext, bool>	_typeAlertCb;
+		function<ScopeItem[]>						_loadAlertCb;
+		function<Member[]>							_loadMemberlertCb;
+
+		Scope 			_scope;
+		SymbolDoc 		_lastDocComment;
+		ParserContext[]	_context;
+		bool			_inService = false;
+
+		void AddContext(ParserContext context)
+		{
+			_context.Add(context);
+		}
+		ParserContext PopContext()
+		{
+			var last = _context[_context.Length() - 1];
+			_context.Pop();
+			return last;
+		}
+		ParserContext CurrentContext()
+		{
+			return _context[_context.Length() - 1];
+		}
+
+
+
+	}
+
+}
+
+
+
+
+
+
+
+
+

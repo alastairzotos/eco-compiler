@@ -1,0 +1,1000 @@
+/*
+ * eco library (client)
+ *
+ * compiler.eco
+ */
+
+using std;
+
+
+namespace eco
+{
+
+	/** Compiler */
+	class Compiler
+	{
+
+		map _expressionLocations;
+		
+		new(string projectName, object packageContents)
+		{
+			_projectName = projectName;
+
+			// Imports
+			_sharedImports = [];
+			_serverImports = [];
+			_clientImports = [];
+
+			// Setup parser
+			_expressionLocations = {};
+			_parser = new Parser();
+			_parser.OnErrorRegistered = function(ParserError error) {
+				if (OnParserError) OnParserError(error);
+			};
+			_parser.OnClearExpressions = function() {
+				//_expressionLocations = {};
+			};
+			_parser.OnExpressionCreated = function(ExpressionNode expressionNode) {
+				_expressionLocations[_parser.CurrentFileID + ":" + expressionNode.StartLine] = {
+					file: _parser.CurrentFileName,
+					line: expressionNode.StartLine,
+					column: expressionNode.StartColumn
+				};
+			};
+
+
+			// Create symbol tables
+			SetupSymbolTables(projectName, packageContents);
+
+			// Create semantic analyser
+			_semanticAnalyser = new SemanticAnalyser(_serverSymbolTable, _clientSymbolTable, _sharedSymbolTable);
+
+
+			// Create models
+			_models = {};
+			CreateModels(packageContents);
+
+
+            // REM _dependencies = (string[])packageContents.dependencies;
+		}
+
+
+		function<> OnClearAutocompletions;
+		function<map> OnAddAutocompletion;
+		function<ParserError> OnParserError;
+		bool DebugMode = true;
+
+
+		/** Expression mappings */
+		map ExpressionMappings : private _expressionMappings
+		{
+			get return _expressionMappings;
+		}
+
+		/** Model list */
+		map<CompilerModel> Models : private _models
+		{
+			get return _models;
+		}
+
+		/** Client symbol table */
+		SymbolTable ClientSymbolTable : private _clientSymbolTable
+		{
+			get return _clientSymbolTable;
+		}
+
+		/** Server symbol table */
+		SymbolTable ServerSymbolTable : private _serverSymbolTable
+		{
+			get return _serverSymbolTable;
+		}
+
+		/** Shared symbol table */
+		SymbolTable SharedSymbolTable : private _sharedSymbolTable
+		{
+			get return _sharedSymbolTable;
+		}
+
+
+		/** Parser */
+		Parser Parser : private _parser
+		{
+			get return _parser;
+		}
+
+		/** Semantic analyser */
+		SemanticAnalyser Analyser : private _semanticAnalyser
+		{
+			get return _semanticAnalyser;
+		}
+
+
+		/** Creates a model if it doesnt already exist. Call this to add a file to the project */
+		void CreateModelIfNotExist(object file, CompilationTarget target)
+		{
+			var id = (string)file.id;
+			if (_models.HasKey(id))
+				return;
+
+			var model = new FileCompilerModel(this, id, (string)file.name, target, (string)file.content);
+			_models[id] = model;
+		}
+
+		/** Creates a component model if it doesnt already exist */
+		void CreateComponentModelIfNotExist(object comp)
+		{
+			var name = (string)comp.name;
+
+			var serverFile = comp.serverFile;
+			var serverFileId = (string)serverFile.id;
+
+			var clientFile = comp.clientFile;
+			var clientFileId = (string)clientFile.id;
+
+			if (_models.HasKey(serverFileId))
+				return;
+
+			var serverModel = new ServerComponentCompilerModel(this, serverFileId, name, (string)serverFile.content);
+			_models[serverFileId] = serverModel;
+
+			var clientModel = new ClientComponentCompilerModel(this, clientFileId, name, (string)clientFile.content);
+			_models[clientFileId] = clientModel;
+		}
+
+		/** Removes a model */
+		void RemoveModel(object file)
+		{
+			if (_models.HasKey((string)file.id))
+				_models.Delete((string)file.id);
+		}
+
+
+		/** To be called when a file is opened */
+		void FileOpened(string fileId, object fileInfo)
+		{
+			_semanticAnalyser.Verifier.Reset(fileId);
+			CreateModelIfNotExist(fileId, fileInfo);
+		}
+
+
+		/** Pass parser error to recipients */
+		void AddParserError(ParserError error)
+		{
+			if (OnParserError) OnParserError(error);
+		}
+
+
+		/** Clear all symbols and perform a full build */
+		void Rebuild(function<> cb = null)
+		{
+			_sharedSymbolTable.ClearAll();
+			_clientSymbolTable.ClearAll();
+			_serverSymbolTable.ClearAll();
+			Interface.ResetCount();
+			Namespace.ClearStylingClasses();
+
+			PerformFullBuild();
+
+			if (cb)
+				cb();
+		}
+
+		/** Perform full build without clearing existing symbols */
+		void PerformFullBuild()
+		{
+			CompilerModel[] sharedModels = [];
+			CompilerModel[] otherModels = [];
+
+			foreach (var id in _models.Keys())
+			{
+				if (_models[id].Target == CompilationTarget.Shared)
+					sharedModels.Add(_models[id]);
+				else
+					otherModels.Add(_models[id]);
+
+				_semanticAnalyser.Verifier.Reset(_models[id].FileID); //, _models[id].GetSymbolTableByTarget());
+			}
+
+			// First build shared models as other files will depend on these
+			foreach (var model in sharedModels)	model.BuildSkeleton();
+			foreach (var model in sharedModels)	model.Build();
+
+			// Copy shared symbol table
+			/*foreach (var model in otherModels)
+			{
+				foreach (var shared in _sharedSymbolTable.SymbolArray)
+					model.GetSymbolTableByTarget().SetSymbol(shared, true);
+			}*/
+
+			// Above wasn't working when there was no client or no server models. Shared symbol table wasn't being copied
+			// It also appears that the shared symbol table was being copied multiple times if there were multiple client/server models
+			// Keeping just in case
+			foreach (var shared in _sharedSymbolTable.SymbolArray)
+			{
+				_clientSymbolTable.SetSymbol(shared, true);
+				_serverSymbolTable.SetSymbol(shared, true);
+			}
+
+			// Now build other models
+			foreach (var model in otherModels) model.BuildSkeleton();
+			foreach (var model in otherModels) model.Build();
+
+			_semanticAnalyser.Verifier.VerifyAll();
+
+			foreach (var error in _semanticAnalyser.Errors)
+				AddParserError(error);
+		}
+
+
+		/**
+			Compiles the project
+			Callback parameters are:
+				- Serialized client symbol table
+				- Serialized server symbol table
+				- Generated common client output
+				- Generated server output
+				- Generated server output
+		 */
+		void Compile(function<object, object, string, string, string> onCompiled)
+		{
+			Namespace.SetCurrentPackageID(0); // TODO: Used to be _packageId
+
+			//PerformFullBuild();
+			Rebuild();
+
+			// Use all the namespaces for now
+			map<ImportNode[]> allImports = {
+				client: (ImportNode[])[],
+				server: (ImportNode[])[]
+			};
+
+			foreach (var id in _models.Keys())
+			{
+				var model = _models[id];
+				var symbolTable = model.GetSymbolTableByTarget();
+				var namespaces = model.Usings;
+				var imports = model.Imports;
+
+				foreach (var imp in imports)
+				{
+					if (model.Target == CompilationTarget.Client)
+						allImports["client"].Add(imp);
+					else if (model.Target == CompilationTarget.Server)
+						allImports["server"].Add(imp);
+				}
+
+				foreach (var used in namespaces)
+					symbolTable.UseNamespace(symbolTable.GetNamespaceFromTypeNode(used));
+			}
+
+
+			// Show symbol tables for debugging purposes
+			//:console.clear();
+			:console.log({client: _clientSymbolTable.Serialise(), server: _serverSymbolTable.Serialise(), shared: _sharedSymbolTable.Serialise()});
+			:console.log(_projectName);
+
+			// Translate
+			var clientTranslator = new JSTranslator(0, _projectName, CompilationTarget.Client, allImports["client"], _clientSymbolTable, _serverSymbolTable, _sharedSymbolTable);
+			var serverTranslator = new JSServerTranslator(0, _projectName, CompilationTarget.Server, allImports["server"], _serverSymbolTable, _sharedSymbolTable);
+
+			clientTranslator.DebugMode = DebugMode;
+			serverTranslator.DebugMode = DebugMode;
+
+			if (DebugMode)
+				serverTranslator.ExpressionLocations = _expressionLocations;
+
+			clientTranslator.WriteComments = true;
+			serverTranslator.WriteComments = true;
+
+			var clientOutput = clientTranslator.Translate();
+			var clientCommon = clientTranslator.GetCommonCode();
+
+			var serverOutput = serverTranslator.Translate();
+			var serverCommon = serverTranslator.GetCommonCode();
+			serverOutput = serverCommon + serverOutput;
+
+			if (DebugMode)
+				_expressionMappings = serverTranslator.ExpressionMappings;
+
+			if (onCompiled)
+				onCompiled(_clientSymbolTable.Serialise(), _serverSymbolTable.Serialise(), clientCommon, clientOutput, serverOutput);
+		}
+
+
+		/** Apply a change to a code file. Returns symbol were affecting */
+		Symbol ApplyChange(string fileId, object change, object editor = null)
+		{
+			var activeModel = _models[fileId];
+			Symbol symbolBeingEditted = null;
+
+			_semanticAnalyser.Verifier.Reset(activeModel.FileID); //, activeModel.GetSymbolTableByTarget());
+
+			// Update code in model if change comes from editor
+			if (editor)
+				activeModel.Code = (string)editor.getModel().getValue();
+
+			if (change)
+			{
+				// If we're typing in a method then we only need to process changes within that method
+				// Edit: see below
+				var inMethod = activeModel.GetMethodAtPosition((int)change.range.endLineNumber, (int)change.range.endColumn);
+				CreateParserAlerts(activeModel, change, inMethod);
+				if (inMethod)
+				{
+					// Only processing this method means we lose all errors in other methods in this file
+					// As it's not possible right now to attach errors to symbols (they're attached to files)
+					// we just process the whole file by skipping return
+
+					ReprocessMethod(activeModel, inMethod);
+					//_semanticAnalyser.Verifier.VerifyAll();
+					//return inMethod;
+
+					symbolBeingEditted = inMethod;
+				}
+				//else
+				{
+
+					// Adjust symbol offsets
+					var text = (string)change.text;
+					var range = change.range;
+
+					var sizeDifference = 0;
+					var posDifference = 0;
+					if (text.Length() > 0)
+						sizeDifference = text.Split("\n").Length() - 1;
+					else
+						sizeDifference = (int)range.startLineNumber - (int)range.endLineNumber;
+
+					var offsets = activeModel.GetSymbolOffsetsFromLine((int)range.startLineNumber);
+
+					var curNamespace = activeModel.GetNamespaceAtPosition((int)range.startLineNumber, (int)range.endLineNumber);
+
+					activeModel.AdjustSymbolOffsets(
+						sizeDifference,
+						posDifference,
+						(Namespace[])offsets.namespaces,
+						(Method[])offsets.methods
+					);
+
+					// Check if we're changing a namespace/class/etc name
+					// If we are, reprocess everything so we don't keep old names before user has finished typing
+					var inSymbolDef = activeModel.GetNamespaceDefinitionAtPosition((int)change.range.endLineNumber, (int)change.range.endColumn);
+					if (inSymbolDef)
+					{
+						Rebuild();
+						return inSymbolDef;
+					}
+				}
+			}
+
+
+			// Build only this model. Full build happens at compile-time
+			activeModel.Build();
+			_semanticAnalyser.Verifier.VerifyAll();
+
+			foreach (var error in _semanticAnalyser.Errors)
+				AddParserError(error);
+
+			// Handle changes at position after build is complete
+			if (change)
+			{
+				var typingIn = activeModel.GetSymbolAtPosition((int)change.range.startLineNumber, (int)change.range.startColumn);
+				if (typingIn)
+				{
+
+					// Clear cache in namespace symbols
+					if (typingIn.IsNamespace())
+						((Namespace)typingIn).ClearCache();
+
+						return typingIn;
+				}
+			}
+
+			return symbolBeingEditted;
+		}
+
+
+		/** Reprocesses a method method */
+		void ReprocessMethod(CompilerModel activeModel, Method method)
+		{
+			activeModel.PrepareForBuild(function() {
+
+				method.Owner.ClearCache();
+
+				// Find how far away other symbols are that are declared after this method
+				var offsets = activeModel.GetSymbolOffsetsFromMethod(method);
+
+				// Get old end point
+				var oldEndLine = method.DefinitionEndLine;
+				var oldEndPos = method.DefinitionEndPosition;
+
+
+				// Parse and set new block
+				var parseResult = _parser.ParseMethodBody(method);
+
+				// Get difference in size and position
+				var sizeDifference = method.DefinitionEndLine - oldEndLine;
+				var posDifference = method.DefinitionEndPosition - oldEndPos;
+
+				// Apply difference across all other symbols defined after this so they are known to be in their correct positions
+				activeModel.AdjustSymbolOffsets(sizeDifference, posDifference, (Namespace[])offsets.namespaces, (Method[])offsets.methods);
+
+
+				// Verify
+				_semanticAnalyser.UseNamespaces(activeModel.FileID, activeModel.GetSymbolTableByTarget(), activeModel.Usings);
+				_semanticAnalyser.Verifier.ResetAndVerifyMethod(activeModel.FileID, activeModel.Name, activeModel.GetSymbolTableByTarget(), method);
+
+			});
+		}
+
+
+		/** Imports a package */
+		void ImportPackage(string name, string rawClient, string rawServer, string rawShared)
+		{
+			_sharedImports.Add(SymbolTable.Import(name, _sharedSymbolTable, :JSON.parse(rawShared)));
+			_clientImports.Add(SymbolTable.Import(name, _clientSymbolTable, :JSON.parse(rawClient), _sharedSymbolTable));
+			_serverImports.Add(SymbolTable.Import(name, _serverSymbolTable, :JSON.parse(rawServer), _sharedSymbolTable));
+
+			ApplyImports();
+		}
+
+
+		/** Adds imported symbols to symbol tables */
+		void ApplyImports()
+		{
+			foreach (var imported in _sharedImports)
+			{
+				foreach (var symbol in imported.SymbolArray)
+					_sharedSymbolTable.SetSymbol(symbol);
+			}
+
+			foreach (var imported in _serverImports)
+			{
+				foreach (var symbol in imported.SymbolArray)
+					_serverSymbolTable.SetSymbol(symbol);
+			}
+
+			foreach (var imported in _clientImports)
+			{
+				foreach (var symbol in imported.SymbolArray)
+					_clientSymbolTable.SetSymbol(symbol);
+			}
+		}
+
+
+	private:
+		string 				_projectName;
+
+		SymbolTable[] 		_sharedImports;
+		SymbolTable[] 		_serverImports;
+		SymbolTable[] 		_clientImports;
+
+		string[]			_dependencies;
+
+
+		int 				_fileCount;
+		array CollectFiles(object packageContents, string entry)
+		{
+			var output = [];
+
+			function<object> collectFiles;
+			collectFiles = function(object cur) {
+				if (cur.isdir)
+				{
+					var files = (map)cur.files;
+					foreach (var key in files.Keys())
+					{
+						if (files[key].isdir)
+							collectFiles(files[key]);
+						else
+							output.Add(((map)files[key]).Merge({name: key}).Omit(["isdir"]));
+					}
+				}
+			};
+
+			collectFiles(packageContents[entry]);
+
+			return output;
+		}
+
+		array CollectComponents(object packageContents)
+		{
+			var output = [];
+			:console.log(packageContents);
+			var root = (map)packageContents.components.files;
+
+			foreach (var name in root.Keys())
+			{
+				var compData = root[name];
+
+				var serverFile = ((map)compData.files[name + "-server.eco"]).Merge({name: name + "-server.eco"}).Omit(["isdir"]);
+				var clientFile = ((map)compData.files[name + "-client.eco"]).Merge({name: name + "-client.eco"}).Omit(["isdir"]);
+
+				output.Add({
+					name: name,
+					serverFile: serverFile,
+					clientFile: clientFile
+				});
+			}
+
+			return output;
+		}
+
+		void CreateModels(object packageContents)
+		{
+			var server = CollectFiles(packageContents, "server");
+			var client = CollectFiles(packageContents, "client");
+			var shared = CollectFiles(packageContents, "shared");
+			var components = CollectComponents(packageContents);
+
+
+			foreach (var file in server)		CreateModelIfNotExist(file, CompilationTarget.Server);
+			foreach (var file in client)		CreateModelIfNotExist(file, CompilationTarget.Client);
+			foreach (var file in shared)		CreateModelIfNotExist(file, CompilationTarget.Shared);
+			foreach (var comp in components)	CreateComponentModelIfNotExist(comp);
+		}
+
+
+		// Deprecated
+		void CreateModelIfNotExist(string fileId, object fileInfo)
+		{
+			if (_models.HasKey(fileId))
+				return;
+
+			var type = (string)fileInfo.type;
+
+			switch (type)
+			{
+				case "file":
+				{
+					CompilationTarget target;
+					if (fileInfo.Target == 0) 		target = CompilationTarget.Server;
+					else if (fileInfo.Target == 1)	target = CompilationTarget.Client;
+					else if (fileInfo.Target == 2)	target = CompilationTarget.Shared;
+
+
+					var model = new FileCompilerModel(this, fileId, (string)fileInfo.Name, target, (string)fileInfo.Code);
+					_models[fileId] = model;
+
+					break;
+				}
+
+				case "comp-s-file":
+				{
+					var serverModel = new ServerComponentCompilerModel(this, fileId, (string)fileInfo.Name, (string)fileInfo.ServerCode);
+					_models[fileId] = serverModel;
+
+					break;
+				}
+
+				case "comp-c-file":
+				{
+					var clientModel = new ClientComponentCompilerModel(this, fileId, (string)fileInfo.Name, (string)fileInfo.ClientCode);
+					_models[fileId] = clientModel;
+
+					break;
+				}
+
+				case "plugin-s-file":
+				{
+					var serverModel = new ServerComponentCompilerModel(this, fileId, (string)fileInfo.Name, (string)fileInfo.ServerCode);
+					_models[fileId] = serverModel;
+
+					break;
+				}
+
+				case "plugin-c-file":
+				{
+					var clientModel = new ClientComponentCompilerModel(this, fileId, (string)fileInfo.Name, (string)fileInfo.ClientCode);
+					_models[fileId] = clientModel;
+
+					break;
+				}
+
+				case "init":
+				{
+					var model = new InitialiserCompilerModel(this, fileId, (string)fileInfo.Name, (string)fileInfo.Code);
+					_models[fileId] = model;
+					break;
+				}
+
+				case "service":
+				{
+					var model = new ServiceCompilerModel(this, fileId, (string)fileInfo.Name, (string)fileInfo.Code);
+					_models[fileId] = model;
+					break;
+				}
+			}
+
+		}
+
+
+		void CreateParserAlerts(CompilerModel model, object change, Method inMethod)
+		{
+			var line = (int)change.range.endLineNumber;
+			var column = (int)change.range.endColumn;
+			var text = change.text;
+
+			if (OnClearAutocompletions) OnClearAutocompletions();
+
+			CreateIdentAlert(model, line, column, inMethod);
+			CreateTypeAlert(model, line, column, inMethod);
+			CreateDotAccessAlert(model, line, column, inMethod);
+		}
+
+
+		void CreateIdentAlert(CompilerModel model, int line, int column, Method inMethod)
+		{
+			_parser.AlertOnLoad(line, column, function(ScopeItem[] items) {
+				foreach (var item in items)
+				{
+					if (item.Name != "self")
+					{
+						if (OnAddAutocompletion)
+						{
+							OnAddAutocompletion({
+								label:			item.Name,
+								kind: 			:monaco.languages.CompletionItemKind.Variable,
+								detail:			item.ItemType.Signature(),
+								sortText:		"0-local"
+							});
+						}
+					}
+				}
+			});
+
+			_parser.AlertOnLoadMember(line, column, function(Member[] items) {
+				foreach (var item in items)
+				{
+					if (!item.IsMethod() || !((Constructor)item).IsConstructor() )
+					{
+						if (OnAddAutocompletion)
+						{
+							OnAddAutocompletion(CreateMemberCompletion(model, item, false, false, false));
+						}
+					}
+				}
+			});
+		}
+
+		void CreateTypeAlert(CompilerModel model, int line, int column, Method inMethod)
+		{
+			_parser.AlertOnType(line, column, function(Namespace ns, ParserContext context, bool currentlyInMethod) {
+
+				if (ns)
+				{
+					var completions = [];
+					//_parser.ClearAlerts();
+					//_ctrl.ClearAutoCompletions();
+
+					// For static members
+					if (ns.IsInterface())
+					{
+						var intr = (Interface)ns;
+
+						if (intr.IsEnum())
+						{
+							var pairs = ((Enum)intr).KVPairs;
+							foreach (var key in pairs.Keys())
+							{
+								if (OnAddAutocompletion)
+								{
+									OnAddAutocompletion({
+										label:			key,
+										kind: 			:monaco.languages.CompletionItemKind.Field
+									});
+								}
+							}
+						}
+
+						else if (intr.IsClass())
+						{
+							if (inMethod)
+							{
+								var members = ((Class)ns).GetMembersAccessibleFrom(inMethod);
+
+								foreach (var member in members)
+								{
+									if (OnAddAutocompletion)
+									{
+										OnAddAutocompletion(CreateMemberCompletion(model, member, false, true));
+									}
+								}
+							}
+						}
+					}
+
+					// Everything else
+					else
+					{
+						Namespace[] visible = [];
+
+						// Show basic types unless we are in one of these contexts
+						if (context != ParserContext.Type &&
+							context != ParserContext.New &&
+							context != ParserContext.ClassInfo &&
+							context != ParserContext.Using)
+						{
+							visible = [
+								Interface.VoidType,
+								Interface.BoolType,
+								Interface.CharType,
+								Interface.IntType,
+								Interface.FloatType,
+								Interface.StringType,
+								Interface.ObjectType
+							];
+						}
+
+						ns.CollectVisibleNamespaces(visible);
+
+						if (context != ParserContext.Type && context != ParserContext.Using)
+						{
+							foreach (var usedNode in model.Usings)
+							{
+								var used = model.GetSymbolTableByTarget().GetNamespaceFromTypeNode(usedNode);
+
+								if (used)
+									used.CollectVisibleNamespaces(visible);
+							}
+						}
+
+						if (context == ParserContext.Member)
+						{
+							if (ns.Namespace)
+								ns.Namespace.CollectVisibleNamespaces(visible);
+						}
+
+						// Add shared symbol table
+						if (context != ParserContext.Type)
+							_sharedSymbolTable.CollectVisibleNamespaces(visible);
+
+						foreach (var symbol in visible)
+						{
+							var docs = "";
+							if (symbol.Docs)
+								docs = symbol.Docs.ToString();
+
+
+							// Only show namespaces if doing 'using' statement
+							if (_parser.InContext(ParserContext.Using))
+							{
+								if (symbol.Type == SymbolType.Namespace)
+								{
+									if (OnAddAutocompletion)
+									{
+										OnAddAutocompletion({
+											label:			symbol.Name,
+											kind: 			:monaco.languages.CompletionItemKind.Module,
+											documentation:	docs,
+											sortText:		"10-namespace"
+										});
+									}
+								}
+							}
+
+
+							// Only show namespaces and constructors if doing 'new' expression
+							else if (_parser.InContext(ParserContext.New))
+							{
+								if (symbol.Type == SymbolType.Namespace)
+								{
+									if (OnAddAutocompletion)
+									{
+										OnAddAutocompletion({
+											label:			symbol.Name,
+											kind: 			:monaco.languages.CompletionItemKind.Module,
+											documentation:	docs,
+											sortText:		"10-namespace"
+										});
+									}
+								}
+								else if (symbol.Type == SymbolType.Class)
+								{
+									var cls = (Class)symbol;
+
+									foreach (var member in cls.Members)
+									{
+										if (member.IsMethod())
+										{
+											if (((Method)member).IsConstructor())
+											{
+												var constr = (Constructor)member;
+
+												if (inMethod && constr.AccessibleFrom(inMethod))
+												{
+													if (OnAddAutocompletion)
+													{
+														OnAddAutocompletion(CreateMemberCompletion(model, member, false));
+													}
+												}
+											}
+										}
+									}
+								}
+							}
+
+							// Otherwise show all available types
+							else
+							{
+								if (OnAddAutocompletion)
+								{
+									if (symbol.Type == SymbolType.Namespace)
+									{
+										OnAddAutocompletion({
+											label:			symbol.Name,
+											kind: 			:monaco.languages.CompletionItemKind.Module,
+											documentation:	docs,
+											sortText:		"10-namespace"
+										});
+									}
+									else if (symbol.Type == SymbolType.Interface)
+									{
+										OnAddAutocompletion({
+											label:			symbol.Name,
+											kind: 			:monaco.languages.CompletionItemKind.Interface,
+											documentation:	docs,
+											sortText:		"12-interface"
+										});
+									}
+									else if (symbol.Type == SymbolType.Enum)
+									{
+										OnAddAutocompletion({
+											label:			symbol.Name,
+											kind: 			:monaco.languages.CompletionItemKind.Enum,
+											documentation:	docs,
+											sortText:		"13-enum"
+										});
+									}
+									else if (symbol.Type == SymbolType.Class)
+									{
+										OnAddAutocompletion({
+											label:			symbol.Name,
+											kind: 			:monaco.languages.CompletionItemKind.Class,
+											documentation:	docs,
+											insertText:		{value: symbol.Name}, //{value: symbol.Name +  (inMethod ? "($0)" : "")}
+											sortText:		"11-class"
+										});
+									}
+								}
+							}
+
+						}
+					}
+				}
+			});
+		}
+
+
+		void CreateDotAccessAlert(CompilerModel model, int line, int column, Method inMethod)
+		{
+			_parser.AlertOnDotAccess(line, column, function(Interface exprType) {
+
+				if (exprType)
+				{
+					var completions = [];
+					//_parser.ClearAlerts();
+					//_ctrl.ClearAutoCompletions();
+
+					if (!exprType.IsEnum())
+					{
+						if (exprType.IsClass())
+						{
+							if (inMethod)
+							{
+								var members = ((Class)exprType).GetMembersAccessibleFrom(inMethod);
+
+								foreach (var member in members)
+								{
+									if (OnAddAutocompletion)
+										OnAddAutocompletion(CreateMemberCompletion(model, member, true));
+								}
+							}
+						}
+						else
+						{
+							var members = exprType.GetAllMembers();
+							foreach (var member in members)
+							{
+								OnAddAutocompletion(CreateMemberCompletion(model, member, true));
+							}
+						}
+					}
+				}
+			});
+		}
+
+
+		map CreateMemberCompletion(CompilerModel model, Member member, bool variableAccess, bool staticAccess = false, bool forceStaticFilter = true)
+		{
+			if (forceStaticFilter)
+			{
+				if (staticAccess)
+				{
+					if (!member.Static)
+						return null;
+				}
+				else
+				{
+					if (member.Static)
+						return null;
+				}
+			}
+
+			// Show docs
+			var docs = "";
+			if (member.Docs)
+				docs = member.Docs.ToString();
+
+
+			// Access
+			string access;
+			if (member.Access == MemberAccess.Private)
+				access = "private ";
+			else if (member.Access == MemberAccess.Protected)
+				access = "protected ";
+			else if (member.Access == MemberAccess.Public)
+				access = "public ";
+
+			if (member.IsField() || member.IsProperty())
+			{
+				return {
+					label:			member.Signature(),
+					kind: 			:monaco.languages.CompletionItemKind.Field,
+					detail:			access + member.Type.Signature(),
+					documentation:	docs,
+					sortText:		"1-field"
+				};
+			}
+			else if (member.IsMethod())
+			{
+				var method = (Method)member;
+				if (!method.IsPropertyMethod)
+				{
+					if (!method.IsConstructor()) // && !method.IsPropertyMethod)
+					{
+						return {
+							label:			((Method)member).DetailName(),
+							kind: 			:monaco.languages.CompletionItemKind.Method,
+							insertText:		{value: ((Method)member).GetInsertSnippet()},
+							detail:			access + member.Type.Signature(),
+							documentation:	docs,
+							sortText:		"2-method"
+						};
+					}
+					else if (method.IsConstructor())
+					{
+						if (!variableAccess)
+							return {
+								label:			((Constructor)member).ConstructorDetailName(),
+								kind: 			:monaco.languages.CompletionItemKind.Constructor,
+								insertText:		{value: ((Constructor)member).GetInsertSnippet()},
+								detail:			access,
+								documentation:	docs,
+								sortText:		"3-constructor"
+							};
+					}
+				}
+			}
+
+			return null;
+		}
+
+
+		void SetupSymbolTables(string name, object packageContents)
+		{
+			_sharedSymbolTable = new SymbolTable(name + "-shared");
+			_serverSymbolTable = new SymbolTable(name + "-server");
+			_clientSymbolTable = new SymbolTable(name + "-client");
+
+			// Server symbol table
+			_serverSymbolTable.SetSymbol(Interface.PackageInterface);
+			_serverSymbolTable.SetSymbol(Interface.EntryPoint);
+		}
+
+
+	}
+
+
+
+}

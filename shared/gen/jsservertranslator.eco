@@ -1,0 +1,84 @@
+using std;
+
+
+namespace eco
+{
+
+    class JSServerTranslator : JSTranslator
+    {
+        new(int packageId, string projectName, CompilationTarget target, ImportNode[] imports, SymbolTable symbolTable, SymbolTable sharedSymbolTable)
+            : base(packageId, projectName, target, imports, symbolTable, symbolTable, sharedSymbolTable)
+        {
+        }
+
+    protected:
+
+        void CreateStart()
+        {
+            base.CreateStart();
+            
+            if (DebugMode)
+            {
+               // WriteLine("var { __breakpoint } = require('./debugger');");
+
+                // Extend console.log and console.error
+                Comment("Extend console");
+                WriteLine("var __console_log = console.log;");
+                WriteLine("console.log = function(msg) {");
+                Indent();
+                WriteLine("process.send({stdout: msg, stderr: ''});");
+                WriteLine("__console_log(msg);");
+                Outdent();
+                WriteLine("};\n");
+
+                WriteLine("var __console_error = console.error;");
+                WriteLine("console.error = function(msg) {");
+                Indent();
+                WriteLine("process.send({stdout: '', stderr: msg});");
+                WriteLine("__console_error(msg);");
+                Outdent();
+                WriteLine("};\n");
+
+            }
+        }
+
+        void CreateEnd()
+        {
+            if (_target == CompilationTarget.Server)
+            {
+                // Exports
+                Comment("Node exports");
+                WriteLine("module.exports = {");
+
+                WriteLine("};\n\n");
+
+
+
+                // Init main class
+                var main = SymbolTable.GetSymbolBySignature(_projectName, true);
+                if (main && main.IsNamespace() && ((Namespace)main).IsInterface() && ((Interface)main).IsClass())
+                {
+                    var mainClass = (Class)main;
+
+                    var ctor = mainClass.GetMember("_New()");
+                    if (ctor)
+                    {
+                        Comment("Start by calling default constructor on " + mainClass.Name);
+                        WriteLine("try");
+                        WriteLine("{");
+                        Indent();
+                        WriteLine(mainClass.FullName + "." + ctor.CompiledName() + "(new " + mainClass.FullName + "());");
+                        Outdent();
+                        WriteLine("}");
+                        WriteLine("catch (e)");
+                        WriteLine("{");
+                        Indent();
+                        WriteLine("console.error(e.stack);");
+                        Outdent();
+                        WriteLine("}");
+                    }
+                }
+            }
+        }
+    }
+}

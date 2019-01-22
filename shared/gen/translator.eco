@@ -1,0 +1,488 @@
+/*
+ * eco library (client)
+ *
+ * translator.eco
+ */
+
+using std;
+
+
+namespace eco
+{
+
+	/** Captures list */
+	class CaptureList
+	{
+		new()
+		{
+			_items = [];
+		}
+
+		ScopeItem[] Items : private _items
+		{
+			get return _items;
+		}
+
+		void AddItem(ScopeItem item)
+		{
+			foreach (var i in _items)
+			{
+				if (i.CompiledName() == item.CompiledName())
+					return;
+			}
+			_items.Add(item);
+		}
+	}
+
+
+	/** Translator */
+	class Translator
+	{
+		new(string projectName, SymbolTable symbolTable, SymbolTable sharedSymbolTable)
+		{
+			_projectName = projectName;
+			_symbolTable = symbolTable;
+			_sharedSymbolTable = sharedSymbolTable;
+			_stack = [];
+			_startCode = "";
+			_commonCode = "";
+			_indent = 0;
+			_writeComments = false;
+			_shouldIndent = true;
+			_shouldNewLine = true;
+			_minify = false;
+
+			_symbolsToCompile = [];
+			_classesToCompile = [];
+			_nativeClassesToCompile = [];
+			_namespacesToCompile = [];
+
+			_captureLists = [];
+			_captureLists.Add(new CaptureList());
+
+			_expressionMappings = {};
+		}
+
+		bool DebugMode = true;
+
+		SymbolTable SymbolTable : protected _symbolTable
+		{
+			get return _symbolTable;
+		}
+
+		SymbolTable SharedSymbolTable : protected _sharedSymbolTable
+		{
+			get return _sharedSymbolTable;
+		}
+
+		bool Minify : private _minify
+		{
+			get return _minify;
+			set _minify = value;
+		}
+
+		bool WriteComments : private _writeComments
+		{
+			get return _writeComments;
+			set _writeComments = value;
+		}
+
+		map ExpressionLocations : protected _expressionLocations
+		{
+			get return _expressionLocations;
+			set _expressionLocations = value;
+		}
+
+		map ExpressionMappings : protected _expressionMappings
+		{
+			get return _expressionMappings;
+			set _expressionMappings = value;
+		}
+
+		string Translate()
+		{
+			PushStack();
+
+			var symbols = _symbolTable.Symbols;
+
+			foreach (var key in symbols.Keys())
+				CollectObjectsToCompile(symbols[key]);
+
+			PushStack();
+			CreateStart();
+			var createdStart = PopStack();
+
+
+			// Arrange classes to manage forward referencing
+			Class[][] classOrder = [];
+			for (int i = 0; i < 100; i++)
+				classOrder.Add([]);
+
+			foreach (var cls in _classesToCompile)
+				classOrder[cls.ClassDepth].Add(cls);
+
+
+			// Native classes
+			foreach (var nativeClass in _nativeClassesToCompile)
+				TranslateSymbol(nativeClass.Name, nativeClass);
+
+			if (DebugMode)
+				_currentLine += (_commonCode + createdStart).Split("\n").Length();
+
+			// Namespaces
+			foreach (var ns in _namespacesToCompile)
+				TranslateNamespace(ns.Name, ns);
+
+			// Regular classes
+			foreach (var order in classOrder)
+			{
+				foreach (var cls in order)
+				{
+					_currentFileID = cls.FileID;
+					TranslateSymbol(cls.Name, cls);
+				}
+			}
+
+			// All other symbols
+			foreach (var other in _symbolsToCompile)
+				TranslateSymbol(other.Name, other);
+
+			CreateEnd();
+
+
+			return createdStart + _startCode + PopStack();
+		}
+
+
+		string GetCommonCode()
+		{
+			return _commonCode;
+		}
+
+	protected:
+		string _projectName;
+		bool _shouldIndent;
+		bool _shouldNewLine;
+		CaptureList[] _captureLists;
+
+		Namespace[] _namespacesToCompile;
+		Class[] _classesToCompile;
+		Class[] _nativeClassesToCompile;
+		Symbol[] _symbolsToCompile;
+
+		int _currentLine;
+		string _currentFileID;
+
+
+		string QualifyName(string sig)
+		{
+			var output = "";
+
+			for (int c = 0; c < sig.Length(); c++)
+			{
+				if (sig[c] == '.')
+					output += "__";
+				else
+					output += sig[c];
+			}
+
+			return output;
+		}
+
+		void TranslateSymbol(string name, Symbol symbol)
+		{
+			var symbolType = symbol.Type;
+
+			if (symbol.Imported)
+			{
+				if (symbol.Type == SymbolType.Namespace)
+				{
+					TranslateNamespace(symbol.Name, (Namespace)symbol);
+				}
+
+				return;
+			}
+
+			switch (symbolType)
+			{
+				case SymbolType.Namespace:
+				{
+					_symbolTable.UseNamespace((Namespace)symbol);
+					TranslateNamespace(name, (Namespace)symbol);
+					break;
+				}
+
+				case SymbolType.Class:
+				{
+					if (((Class)symbol).IsNative)
+						TranslateNativeClass(name, (Class)symbol);
+					else
+						TranslateClass(name, (Class)symbol);
+
+					break;
+				}
+
+				case SymbolType.Enum:
+				{
+					TranslateEnum(name, (Enum)symbol);
+					break;
+				}
+
+				case SymbolType.Template:
+				{
+					TranslateTemplate(name, (Template)symbol);
+					break;
+				}
+
+				case SymbolType.ServerComponent:
+				{
+					TranslateServerComponent(name, (ServerComponent)symbol);
+					break;
+				}
+
+				case SymbolType.ClientComponent:
+				{
+					TranslateClientComponent(name, (ClientComponent)symbol);
+					break;
+				}
+
+				case SymbolType.Initialiser:
+				{
+					TranslateInitialiser(name, (Initialiser)symbol);
+					break;
+				}
+
+				case SymbolType.Service:
+				{
+					TranslateService(name, (Service)symbol);
+					break;
+				}
+
+			}
+		}
+
+		virtual void CreateStart() {}
+		virtual void CreateEnd() {}
+		virtual void TranslateNamespace(string name, Namespace symbol) {}
+		virtual void TranslateClass(string name, Class symbol) {}
+		virtual void TranslateNativeClass(string name, Class symbol) {}
+		virtual void TranslateEnum(string name, Enum symbol) {}
+		virtual void TranslateTemplate(string name, Template symbol) {}
+		virtual void TranslateServerComponent(string name, ServerComponent symbol) {}
+		virtual void TranslateClientComponent(string name, ClientComponent symbol) {}
+		virtual void TranslateInitialiser(string name, Initialiser symbol) {}
+		virtual void TranslateService(string name, Service symbol) {}
+
+		virtual string GetTypeDefaultLiteral(map type) { return "null"; }
+
+
+
+		void PushStack()
+		{
+			_stack.Add("");
+		}
+
+		string PopStack()
+		{
+			var top = _stack.Pop();
+
+			return top;
+		}
+
+		virtual void Comment(string text)
+		{
+			if (!_minify && _writeComments)
+				WriteLine("// " + text);
+		}
+
+		virtual void DocComment(Namespace symbol)
+		{
+			if (!_minify && _writeComments)
+			{
+				if (symbol.Docs)
+					Write(symbol.Docs.ToString(true, GetIndent()));
+				else
+				{
+					if (symbol.Type == SymbolType.Class)
+					{
+						var cls = (Class)symbol;
+						Comment("Class " + cls.Name + (cls.BaseClass ? (" : " + cls.BaseClass.Name) : ""));
+					}
+				}
+			}
+		}
+
+		virtual void DocComment(Member symbol)
+		{
+			if (!_minify && _writeComments)
+			{
+				if (symbol.Docs)
+					Write(symbol.Docs.ToString(true, GetIndent()));
+				else
+				{
+					if (symbol.IsMethod())
+					{
+						var method = (Method)symbol;
+
+						if (method.IsConstructor())
+							Comment("Constructor " + method.Signature());
+						else 
+							Comment((method.Static ? "static " : "") + (method.Virtual ? "virtual " : "") + method.Type.Signature() + " " + method.Signature() );
+					}
+				}
+			}
+		}
+
+
+		void Write(string text, bool indent = false)
+		{
+			if (indent && !_minify)
+			{
+				_stack[_stack.Length() - 1] += (GetIndent() + text);
+			}
+			else
+				_stack[_stack.Length() - 1] += text;
+
+			if (DebugMode && _stack.Length() == 1)
+			{
+				if (((object)text).IsString() && ((object)text).indexOf("\n") > -1)
+					_currentLine += text.Split("\n").Length() - 1;
+			}
+		}
+
+		void Indent()
+		{
+			_indent++;
+		}
+
+		void Outdent()
+		{
+			_indent--;
+		}
+
+		void WriteLine(string text, bool indent = true)
+		{
+			if (_minify)
+				_stack[_stack.Length() - 1] += text + " ";
+			else
+			{
+				if (indent)
+					_stack[_stack.Length() - 1] += GetIndent() + text + "\n";
+				else
+					_stack[_stack.Length() - 1] += (text + "\n");
+			}
+
+			if (DebugMode && _stack.Length() == 1)
+			{
+				if (((object)text).indexOf("\n") > -1)
+					_currentLine += text.Split("\n").Length();
+				else
+					_currentLine++;
+				
+			}
+		}
+
+		void NewLine()
+		{
+			if (!_shouldNewLine)
+				return;
+
+			if (_minify)
+				_stack[_stack.Length() - 1] += " ";
+			else
+				_stack[_stack.Length() - 1] += "\n";
+
+			if (DebugMode && _stack.Length() == 1)
+				_currentLine++;
+		}
+
+		void AddStartCode(string startCode)
+		{
+			_startCode += startCode;
+			if (_minify)
+				_startCode += " ";
+			else
+			{
+				_startCode += "\n\n";
+
+				if (DebugMode)
+				{
+					//_currentLine += _startCode.Split("\n").Length();
+				}
+			}
+		}
+
+
+		void AddCommonCode(string commonCode)
+		{
+			_commonCode += commonCode;
+			if (_minify)
+				_commonCode += " ";
+			else
+			{
+				_commonCode += "\n\n";
+				if (DebugMode)
+				{
+					//_currentLine += commonCode.Split("\n").Length();
+				}
+			}
+		}
+
+
+		void PushCaptureList()
+		{
+			_captureLists.Add(new CaptureList());
+		}
+		CaptureList PopCaptureList()
+		{
+			var last = _captureLists[_captureLists.Length() - 1];
+			_captureLists.Pop();
+			return last;
+		}
+		CaptureList CurrentCaptureList()
+		{
+			return _captureLists[_captureLists.Length() - 1];
+		}
+
+	private:
+		string[] _stack;
+		string _startCode;
+		string _commonCode;
+		int _indent;
+
+		string GetIndent()
+		{
+			if (!_shouldIndent)
+				return "";
+
+			var indent = "";
+			for (int i = 0; i < _indent; i++)
+				indent += "\t";
+
+			return indent;
+		}
+
+		void CollectObjectsToCompile(Symbol sym)
+		{
+			if (sym.GetSymbolType() == SymbolType.Namespace)
+			{
+				var ns = (Namespace)sym;
+				_namespacesToCompile.Add(ns);
+
+				foreach (var s in ns.Symbols.Keys())
+					CollectObjectsToCompile(ns.Symbols[s]);
+			}
+			else if (sym.GetSymbolType() == SymbolType.Class)
+			{
+				if (((Class)sym).IsNative)
+					_nativeClassesToCompile.Add((Class)sym);
+				else
+					_classesToCompile.Add((Class)sym);
+			}
+			else
+				_symbolsToCompile.Add(sym);
+		}
+	}
+
+
+}

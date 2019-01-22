@@ -1,0 +1,4111 @@
+/*
+ * eco library (client)
+ *
+ * symbols.eco
+ */
+
+using std;
+
+
+namespace eco
+{
+
+	/** Symbol type */
+	enum SymbolType
+	{
+		SymbolTable,
+
+		Symbol,
+		Namespace,
+		Interface,
+		Class,
+		Enum,
+		Template,
+		ServerComponent,
+		ClientComponent,
+		Initialiser,
+		Service,
+		Typedef,
+
+		Member
+	}
+
+	/** Member types */
+	enum MemberType
+	{
+		Field,
+		Method,
+		Constructor,
+		Property,
+		ServerRender,
+		TemplateRender
+	}
+
+
+	/** Symbol */
+	class Symbol
+	{
+		new(string name)
+		{
+			_name = name;
+			_symbolType = SymbolType.Symbol;
+			_docs = null;
+			_imported = false;
+		}
+
+		int PackageID : private _packageId
+		{
+			get return _packageId;
+			set _packageId = value;
+		}
+
+		string Name : protected _name
+		{
+			get return _name;
+			set _name = value;
+		}
+
+		string FullName
+		{
+			get
+			{
+				string fullName = _name;
+				if (_namespace && _namespace._namespace)
+					fullName = _namespace.FullName + "." + _name;
+
+				return fullName;
+			}
+		}
+
+
+		SymbolType Type : protected _symbolType
+		{
+			get return _symbolType;
+			set _symbolType = value;
+		}
+
+		// Need to overload due to clashes with Member.Type
+		SymbolType GetSymbolType()
+		{
+			return _symbolType;
+		}
+
+		Namespace Namespace : protected _namespace
+		{
+			get return _namespace;
+			set _namespace = value;
+		}
+
+		int StartLine : protected _startLine
+		{
+			get return _startLine;
+			set _startLine = value;
+		}
+
+		int EndLine : protected _endLine
+		{
+			get return _endLine;
+			set _endLine = value;
+		}
+
+		int StartColumn : protected _startColumn
+		{
+			get return _startColumn;
+			set _startColumn = value;
+		}
+
+		int EndColumn : protected _endColumn
+		{
+			get return _endColumn;
+			set _endColumn = value;
+		}
+
+		string FileID : protected _fileId
+		{
+			get return _fileId;
+			set _fileId = value;
+		}
+
+		bool Imported : protected _imported
+		{
+			get return _imported;
+		}
+
+		SymbolDoc Docs : protected _docs
+		{
+			get return _docs;
+			set _docs = value;
+		}
+
+		void RemoveFromNamespace()
+		{
+			if (_namespace)
+				_namespace.RemoveSymbol(this);
+		}
+
+		Namespace GetRootNamespace()
+		{
+			var cur = this;
+			while (cur)
+			{
+				if (!cur.Namespace)
+					return (Namespace)cur;
+
+				cur = (Namespace)cur.Namespace;
+			}
+
+			return null;
+		}
+
+		virtual string Signature()
+		{
+			return _name;
+		}
+
+		string GetSignatureTo(Namespace ns)
+		{
+			if (_namespace && (_namespace != ns) && _namespace.Namespace)
+			{
+				string sig = _namespace.GetSignatureTo(ns) + "." + Signature();
+				return sig;
+			}
+			else
+			{
+				string sig = Signature();
+				return sig;
+			}
+		}
+
+		virtual string CompiledName()
+		{
+			return Signature();
+		}
+
+		virtual string DetailName()
+		{
+			return Signature();
+		}
+
+		virtual object Serialise()
+		{
+			return _name;
+		}
+
+		virtual bool IsNamespace() { return false; }
+
+
+	}
+
+
+	/** Namespace */
+	class Namespace : Symbol
+	{
+		new(string name) : base(name)
+		{
+			_symbolType = SymbolType.Namespace;
+			_symbols = {};
+			_usings = [];
+
+			_symbolCache = {};
+			_namespaceCache = {};
+			_typeCache = {};
+			_methodCache = {};
+		}
+
+		static void ClearStaticData()
+		{
+			_namespacesCheckedForSymbol = {};
+			_namespacesCheckedForNamespace = {};
+
+			if (_eventTypes)
+			{
+				foreach (var eventType in _eventTypes)
+					eventType.RemoveFromNamespace();
+
+			}
+			_eventTypes = [];
+		}
+
+		static void SetCurrentPackageID(int id)
+		{
+			_currentPckId = id;
+		}
+
+		static int CurrentPackageID : private _currentPckId = 0
+		{
+			get return _currentPckId;
+		}
+
+		static void ClearStylingClasses()
+		{
+			_stylingClasses = [];
+		}
+
+
+		static string[] StylingClasses : private _stylingClasses = []
+		{
+			get return _stylingClasses;
+		}
+
+		static string AddStyling(string style)
+		{
+			_stylingClasses.Add(style);
+			return _currentPckId + "_" +  (_stylingClasses.Length() - 1);
+		}
+
+		static EventType[] EventTypes : protected _eventTypes = []
+		{
+			get return _eventTypes;
+		}
+
+
+		map<Symbol> Symbols : protected _symbols
+		{
+			get return _symbols;
+		}
+
+		Symbol[] SymbolArray
+		{
+			get
+			{
+				Symbol[] arr = [];
+				foreach (var key in _symbols.Keys())
+					arr.Add(_symbols[key]);
+
+				return arr;
+			}
+		}
+
+		void CollectVisibleNamespaces(Namespace[] visible)
+		{
+			var addSymbol = function(Symbol symbol) {
+				if (symbol)
+				{
+					var found = false;
+					foreach (var ns in visible)
+					{
+						if (ns == symbol)
+						{
+							found = true;
+							break;
+						}
+					}
+
+					if (!found && symbol.IsNamespace())
+					{
+						var ns = (Namespace)symbol;
+
+						if (ns.Type == SymbolType.Class)
+						{
+							if (!((Class)ns).IsNative)
+								visible.Add(ns);
+						}
+						else
+							visible.Add(ns);
+					}
+				}
+			};
+
+			foreach (var key in _symbols.Keys())
+			{
+				var symbol = _symbols[key];
+				addSymbol(symbol);
+			}
+		}
+
+		bool SpansMultipleFiles : private _spansMultipleFiles
+		{
+			get return _spansMultipleFiles;
+			set _spansMultipleFiles = value;
+		}
+
+		int DefinitionEndLine : protected _defEndLine
+		{
+			get return _defEndLine;
+			set _defEndLine = value;
+		}
+
+		int DefinitionEndColumn : protected _defEndColumn
+		{
+			get return _defEndColumn;
+			set _defEndColumn = value;
+		}
+
+		Namespace[] Usings : protected _usings
+		{
+			get return _usings;
+		}
+
+
+		void UseNamespace(Namespace ns)
+		{
+			var fullName = ns.FullName;
+
+			foreach (var used in _usings)
+				if (used.FullName == fullName)
+					return;
+
+			_usings.Add(ns);
+		}
+
+		virtual bool SetSymbol(Symbol symbol, bool copyIfNamespace = false)
+		{
+			var signature = symbol.Signature();
+
+			if (copyIfNamespace)
+			{
+				if (symbol.GetSymbolType() == SymbolType.Namespace)
+				{
+					var ns = (Namespace)symbol;
+
+					var copy = new Namespace(ns.Name);
+					copy.StartLine = ns.StartLine;
+					copy.EndLine = ns.EndLine;
+					copy.StartColumn = ns.StartColumn;
+					copy.EndColumn = ns.EndColumn;
+					copy.FileID = ns.FileID;
+					copy._imported = ns.Imported;
+					copy.Docs = ns.Docs;
+					copy.DefinitionEndLine = ns.DefinitionEndLine;
+					copy.DefinitionEndColumn = ns.DefinitionEndColumn;
+
+					foreach (var used in ns.Usings)
+						copy.UseNamespace(used);
+
+					foreach (var sym in ns.SymbolArray)
+						copy.SetSymbol(sym, true);
+
+					symbol = copy;
+
+				}
+			}
+
+			_symbols[signature] = symbol;
+			symbol.Namespace = this;
+
+			return true;
+		}
+
+		void RemoveSymbol(Symbol symbol)
+		{
+			var signature = symbol.Signature();
+
+			if (_symbols.HasKey(signature))
+			{
+				<%[JS] delete this._symbols[signature]; %>
+				<%[PHP] unset($this->_symbols[signature]); %>
+			}
+		}
+
+		void SetLineCount(int lineCount)
+		{
+			StartLine = 0;
+			StartColumn = 0;
+			EndLine = lineCount + 1;
+			EndColumn = 1;
+		}
+
+		void ClearCache()
+		{
+			_symbolCache = {};
+			_namespaceCache = {};
+			_typeCache = {};
+			_methodCache = {};
+
+
+			if (_namespace)
+				_namespace.ClearCache();
+
+			/*foreach (var key in _symbols.Keys())
+				if (_symbols[key].IsNamespace())
+					((Namespace)_symbols[key]).ClearCache();*/
+		}
+
+
+		void ClearAll()
+		{
+			_typeCache = {};
+			_namespaceCache = {};
+			_symbolCache = {};
+			_usings = [];
+			
+			if (_symbols)
+			{
+				foreach (var key in _symbols.Keys())
+				{
+					var symbol = _symbols[key];
+
+					if (!symbol.Imported)
+					{
+						if (symbol.Type == SymbolType.Class)
+						{
+							if (!((Class)symbol).IsNative)
+								RemoveSymbol(symbol);
+						}
+						else
+							RemoveSymbol(symbol);
+					}
+				}
+			}
+		}
+
+		void RefreshFile(string fileId)
+		{
+			_typeCache = {};
+			_namespaceCache = {};
+			_symbolCache = {};
+			_usings = [];
+
+			if (_symbols)
+			{
+				foreach (var key in _symbols.Keys())
+				{
+					var symbol = _symbols[key];
+
+					if (symbol.IsNamespace())
+					{
+						((Namespace)symbol)._namespaceCache = {};
+						((Namespace)symbol)._typeCache = {};
+						((Namespace)symbol)._symbolCache = {};
+					}
+
+					if (symbol.FileID == fileId)
+					{
+						if (!symbol.Imported)
+						{
+							if (symbol.Type == SymbolType.Namespace)
+							{
+								if (!((Namespace)symbol).SpansMultipleFiles)
+									RemoveSymbol(_symbols[key]);
+
+							}
+						}
+					}
+				}
+			}
+		}
+
+		virtual Symbol GetSymbolBySignature(string signature, bool local = false)
+		{
+			_namespacesCheckedForSymbol[FullName] = true;
+			if (_symbols.HasKey(signature))
+			{
+				_namespacesCheckedForSymbol = {};
+				return _symbols[signature];
+			}
+
+			// We might want to look in parents and used namespaces
+			if (!local)
+			{
+
+				Symbol found = null;
+				if (_namespace && !_namespacesCheckedForSymbol.HasKey(_namespace.FullName))
+					found = _namespace.GetSymbolBySignature(signature, false);
+
+				if (found)
+				{
+					//_symbolCache[signature] = found;
+					_namespacesCheckedForSymbol = {};
+					return found;
+				}
+
+				foreach (var used in _usings)
+				{
+					if (used && !_namespacesCheckedForSymbol.HasKey(used.FullName))
+					{
+						found = used.GetSymbolBySignature(signature, false);
+						if (found)
+						{
+							//_symbolCache[signature] = found;
+							_namespacesCheckedForSymbol = {};
+							return found;
+						}
+					}
+				}
+
+			}
+
+			_namespacesCheckedForSymbol.Omit([FullName]);
+			return null;
+		}
+
+		virtual Namespace GetNamespaceBySignature(string signature, bool local = false)
+		{
+			if (signature == Signature()) return this;
+
+			_namespacesCheckedForNamespace[FullName] = true;
+			if (_symbols.HasKey(signature) && _symbols[signature].IsNamespace())
+			{
+				_namespacesCheckedForNamespace = {};
+				return (Namespace)_symbols[signature];
+			}
+
+			// We might want to look in parents and used namespaces
+			if (!local)
+			{
+
+				Namespace found = null;
+				if (_namespace && !_namespacesCheckedForNamespace.HasKey(_namespace.FullName))
+					found = _namespace.GetNamespaceBySignature(signature, false);
+
+				if (found)
+				{
+					//_namespaceCache[signature] = found;
+					_namespacesCheckedForNamespace = {};
+					return found;
+				}
+
+				foreach (var used in _usings)
+				{
+					if (used && !_namespacesCheckedForNamespace.HasKey(used.FullName))
+					{
+						found = used.GetNamespaceBySignature(signature, false);
+						if (found)
+						{
+							//_namespaceCache[signature] = found;
+							_namespacesCheckedForNamespace = {};
+							return found;
+						}
+					}
+				}
+			}
+
+			_namespacesCheckedForNamespace.Omit([FullName]);
+			return null;
+		}
+
+		Interface GetInterfaceFromTypeNode(TypeNode node)
+		{
+			string name = node.FullName;
+
+			//if (_typeCache.HasKey(name))
+			//	return _typeCache[name];
+
+			var found = GetNamespaceFromTypeNode(node);
+
+			if (found && found.IsInterface())
+			{
+				_typeCache[name] = (Interface)found;
+
+				var intr = (Interface)found;
+				if (intr.IsTypedef())
+					return ((TypeDef)intr).OtherType;
+
+				return intr;
+			}
+
+			return null;
+		}
+
+		Namespace GetNamespaceFromTypeNode(TypeNode node)
+		{
+			var ns = this;
+			if (node.Parent)
+				ns = GetNamespaceFromTypeNode(node.Parent);
+
+			_namespacesCheckedForNamespace = {};
+			return ns ? ns.GetNamespaceBySignature(node.Name) : null;
+		}
+
+
+		Interface GetType(TypeNode node, function<TypeNode> onError = null)
+		{
+			if (!node) return null;
+
+			if (!node.Parent && Interface.BasicTypes().HasKey(node.Name))
+				return Interface.BasicTypes()[node.Name];
+
+			var name = node.FullName;
+
+			//if (_typeCache.HasKey(name))
+			//	return _typeCache[name];
+
+			if (node.IsArray())
+			{
+				if (((ArrayTypeNode)node).Elem)
+				{
+					var elem = GetType( ((ArrayTypeNode)node).Elem, onError );
+
+					if (elem)
+					{
+						var type = elem.ArrayOf;
+						_typeCache[name] = type;
+						return type;
+					}
+
+					var type = Interface.NullType.ArrayOf;
+					_typeCache[name] = type;
+					return type;
+				}
+
+				var type = Interface.ObjectType.ArrayOf;
+				_typeCache[name] = type;
+				return type;
+			}
+			else if (node.IsMap())
+			{
+				if (((MapTypeNode)node).Elem)
+				{
+					var elem = GetType( ((MapTypeNode)node).Elem, onError );
+
+					if (elem)
+					{
+						var type = elem.MapOf;
+						_typeCache[name] = type;
+						return type;
+					}
+
+					var type = Interface.NullType.MapOf;
+					_typeCache[name] = type;
+					return type;
+				}
+
+
+				var type = Interface.ObjectType.MapOf;
+				_typeCache[name] = type;
+				return type;
+			}
+			else if (node.IsFunction())
+			{
+				var funcNode = (FunctionTypeNode)node;
+
+				var func = new FunctionType();
+				int paramCount = 0;
+				foreach (var paramTypeNode in funcNode.ParamTypes)
+				{
+					var paramType = GetType(paramTypeNode, onError);
+					//func.AddParamType(paramType);
+					func.AddParam(paramType, funcNode.ParamNames[paramCount]);
+
+					paramCount++;
+				}
+
+				if (funcNode.ReturnType)
+					func.ReturnType = GetType(funcNode.ReturnType, onError);
+
+				_typeCache[name] = func;
+				return func;
+			}
+			else if (node.IsEvent())
+			{
+				var eventNode = (EventTypeNode)node;
+
+				var evnt = new EventType();
+				foreach (var paramTypeNode in eventNode.ParamTypes)
+				{
+					var paramType = GetType(paramTypeNode, onError);
+					evnt.AddParamType(paramType);
+				}
+
+				_eventTypes.Add(evnt);
+				EcoStdLib.CreateEventMethods(evnt);
+
+				_typeCache[name] = evnt;
+				return evnt;
+			}
+			else if (node.IsInline())
+			{
+				var inlineNode = (InlineInterfaceNode)node;
+
+				var inlineType = new InlineInterface();
+
+				foreach (var member in inlineNode.Members)
+				{
+					var createMember = function():Member {
+						var memberType = member.Type;
+						var memberName = member.Name;
+
+						if (member.IsField())
+						{
+							return new Field(GetType(memberType, onError), memberName);
+						}
+						else if (member.IsMethod())
+						{
+							var methodNode = (MethodNode)member;
+
+							var methodMember = new Method(GetType(memberType, onError), memberName);
+							foreach (var parameter in methodNode.Params)
+							{
+								var paramType = (TypeNode)parameter.type;
+								var paramName = (string)parameter.name;
+
+								methodMember.AddParameter(GetType(paramType, onError), paramName);
+							}
+
+							return methodMember;
+						}
+					};
+
+					inlineType.AddMember(createMember());
+				}
+
+				_typeCache[name] = inlineType;
+				return inlineType;
+			}
+
+			var found = (Interface)GetInterfaceFromTypeNode(node);
+			if (!found && onError)
+				onError(node);
+
+			return found;
+		}
+
+
+		// Makes this namespace and sub-namespaces not span multiple files until the next build
+		void RefreshSpan()
+		{
+			_spansMultipleFiles = false;
+
+			foreach (var key in _symbols.Keys())
+			{
+				if (_symbols[key].Type == SymbolType.Namespace)
+					((Namespace)_symbols[key]).RefreshSpan();
+			}
+		}
+
+		virtual bool IsNamespace() { return true; }
+		virtual bool IsInterface() { return false; }
+		virtual bool IsSymbolTable() { return false; }
+
+
+		/** Serialize */
+		object Serialise()
+		{
+			var symbols = {};
+			foreach (var symbol in this.SymbolArray)
+			{
+				//if (!symbol.Imported)
+					symbols[symbol.Name] = symbol.Serialise();
+			}
+
+			return {type: "namespace", symbols: symbols};
+		}
+
+
+		/** Import serialised symbols and build a skeleton */
+		static Namespace ImportSkeleton(string name, object symbols, Namespace parent = null, SymbolTable sharedImport = null)
+		{
+			Namespace imported = new Namespace(name);
+			imported._imported = true;
+			imported.Namespace = parent;
+
+			if (sharedImport)
+			{
+				var sharedSymbols = sharedImport.SymbolArray;
+				foreach (var symbol in sharedSymbols)
+					imported.SetSymbol(symbol);
+			}
+
+			var subSymbols = (map)symbols["symbols"];
+			foreach (var key in subSymbols.Keys())
+			{
+				var symbol = subSymbols[key];
+
+				var type = (string)symbol["type"];
+
+				switch (type)
+				{
+					case "package":
+					case "namespace":
+					{
+						imported.SetSymbol(ImportSkeleton(key, symbol, imported));
+						break;
+					}
+
+					case "interface":
+					{
+						imported.SetSymbol(Interface.ImportSkeleton(key, symbol, imported));
+						break;
+					}
+
+					case "class":
+					{
+						imported.SetSymbol(Class.ImportSkeleton(key, symbol, imported));
+						break;
+					}
+
+					case "template":
+					{
+						imported.SetSymbol(Template.ImportSkeleton(key, symbol, imported));
+						break;
+					}
+
+					case "server-comp":
+					{
+						imported.SetSymbol(ServerComponent.ImportSkeleton(key, symbol, imported));
+						break;
+					}
+
+					case "client-comp":
+					{
+						imported.SetSymbol(ClientComponent.ImportSkeleton(key, symbol, imported));
+						break;
+					}
+
+					case "init":
+					{
+						imported.SetSymbol(Initialiser.ImportSkeleton(key, symbol, imported));
+						break;
+					}
+
+					case "service":
+					{
+						imported.SetSymbol(Service.ImportSkeleton(key, symbol, imported));
+						break;
+					}
+
+					case "enum":
+					{
+						imported.SetSymbol(Enum.ImportEnum(key, symbol, imported));
+						break;
+					}
+				}
+			}
+
+			return imported;
+		}
+
+		/** Import fully */
+		static void ImportFull(string name, Namespace ns, object symbol)
+		{
+			var subSymbols = (map)symbol["symbols"];
+
+			foreach (var key in subSymbols.Keys())
+			{
+				var child = subSymbols[key];
+
+				switch (child["type"])
+				{
+					case "package":
+					case "namespace":
+					{
+						ImportFull(key, (Namespace)ns.Symbols[key], child);
+						break;
+					}
+
+					case "interface":
+					{
+						Interface.ImportFull((Interface)ns.Symbols[key], child);
+						break;
+					}
+
+					case "class":
+					{
+						Class.ImportFull((Class)ns.Symbols[key], child);
+						break;
+					}
+
+					case "template":
+					{
+						Template.ImportFull((Template)ns.Symbols[key], child);
+						break;
+					}
+
+					case "server-comp":
+					{
+						ServerComponent.ImportFull((ServerComponent)ns.Symbols[key], child);
+						break;
+					}
+
+					case "client-comp":
+					{
+						ClientComponent.ImportFull((ClientComponent)ns.Symbols[key], child);
+						break;
+					}
+
+					case "init":
+					{
+						Initialiser.ImportFull((Initialiser)ns.Symbols[key], child);
+						break;
+					}
+
+					case "service":
+					{
+						Service.ImportFull((Service)ns.Symbols[key], child);
+						break;
+					}
+				}
+			}
+		}
+
+
+
+	protected:
+		map<Method>		_methodCache;
+
+	private:
+		static map<bool> _namespacesCheckedForNamespace = {};
+		static map<bool> _namespacesCheckedForSymbol = {};
+
+		map<Symbol>		_symbolCache;
+		map<Namespace>	_namespaceCache;
+		map<Interface>	_typeCache;
+	}
+
+
+	/** Typedef */
+	class TypeDef : Interface
+	{
+		new(string name) : base(name)
+		{
+			_symbolType = SymbolType.Typedef;
+		}
+
+		Interface OtherType : private _otherType
+		{
+			get return _otherType;
+			set _otherType = value;
+		}
+
+		bool IsTypedef() { return true; }
+	}
+
+
+	/** Interface */
+	class Interface : Namespace
+	{
+		new(string name) : base(name)
+		{
+			_symbolType = SymbolType.Interface;
+			_members = [];
+
+			_typeId = ++_typeIdCount;
+		}
+
+		static void ResetCount()
+		{
+			_typeIdCount = 0;
+		}
+
+
+		static Interface[] GetBuiltInTypes()
+		{
+			return [
+				VoidType,
+				BoolType,
+				CharType,
+				IntType,
+				FloatType,
+				StringType,
+				ObjectType
+			];
+		}
+
+		Member[] Members : protected _members
+		{
+			get return _members;
+		}
+
+		virtual Member[] GetAllMembers()
+		{
+			return _members;
+		}
+
+		virtual Member GetMember(string signature)
+		{
+			foreach (var member in _members)
+				if (member.Signature() == signature)
+					return member;
+
+			return null;
+		}
+
+		virtual Member GetMemberByName(string name)
+		{
+			foreach (var member in _members)
+				if (member.Name == name)
+					return member;
+
+			return null;
+		}
+
+		virtual Member[] GetMembersByName(string name)
+		{
+			Member[] members = [];
+
+			foreach (var member in _members)
+				if (member.Name == name)
+					members.Add(member);
+
+			return members;
+		}
+
+		virtual bool AddMember(Member member)
+		{
+			var found = GetMember(member.Signature());
+
+			_members.Add(member);
+			member.Owner = this;
+
+			return found == null;
+		}
+
+		// Get how many other methods have the same name
+		virtual int GetOverload(string name)
+		{
+			int overload = 0;
+
+			foreach (var member in _members)
+			{
+				if (member.IsMethod() && (member.Name == name || member.CompiledName() == name))
+					overload++;
+			}
+
+			return overload;
+		}
+
+		void ClearMembers()
+		{
+			_members = [];
+		}
+
+		virtual bool CastsTo(LitMapExpressionNode mapNode, Scope scope)
+		{
+			if (!IsInline() && !IsClass() && !IsDefined) return false;
+			 
+			foreach (var member in Members)
+			{
+				if (!member.Type) return false;
+
+				if (!mapNode.Items.HasKey(member.Name))
+					return false;
+
+				var mapItem = mapNode.Items[member.Name];
+
+				if (member.IsMethod())
+				{
+					if (mapItem.ExprType != ExpressionType.Function)
+						return false;
+
+					var valueFuncType = (FunctionType)mapItem.GetTypeOf(scope, null);
+					if (!valueFuncType) return false;
+
+					if (!valueFuncType.ReturnType || valueFuncType.ReturnType.DistanceTo(member.Type) < 0)
+						return false;
+
+					var methodMember = (Method)member;
+					if (valueFuncType.ParamTypes.Length() != methodMember.Parameters.Length())
+						return false;
+
+					for (int p = 0; p < valueFuncType.ParamTypes.Length(); p++)
+					{
+						if (!valueFuncType.ParamTypes[p] || !methodMember.Parameters[p].Type)
+							return false;
+
+						if (valueFuncType.ParamTypes[p].DistanceTo(methodMember.Parameters[p].Type) < 0)
+							return false;
+					}
+				}
+				else
+				{
+					var valueType = mapItem.GetTypeOf(scope, null);
+					if (!valueType) return false;
+
+					if (member.Type.IsInline())
+					{
+						if (mapItem.ExprType != ExpressionType.Map)
+							return false;
+
+						var inlineMemberType = (InlineInterface)member.Type;
+						if (!inlineMemberType.CastsTo( (LitMapExpressionNode)mapItem, scope) )
+							return false;
+					}
+					else if (valueType.DistanceTo(member.Type) < 0)
+						return false;
+				}
+			}
+
+			return true;
+		}
+
+
+		virtual int DistanceTo(Interface intr)
+		{
+			if (!intr) return -1;
+			if (intr == this) return 0;
+			if (intr == Interface.ObjectType) return 1;
+			if (this == Interface.NullType && intr.IsComplex()) return 1;
+
+			if (IsComplex() && (intr == Interface.NullType))				return 1;
+			if (this == Interface.NullType && intr.IsComplex()) 			return 1;
+			if (this == Interface.IntType && intr == Interface.FloatType)	return 1;
+			if (this == Interface.FloatType && intr == Interface.IntType)	return 1;
+			if (this == Interface.CharType && intr == Interface.IntType)	return 1;
+			if (this == Interface.IntType && intr == Interface.CharType)	return 1;
+			if (this == Interface.CharType && intr == Interface.StringType)	return 1;
+
+			if (IsArray() && intr.IsArray())
+				return ((ArrayType)this).Elem.DistanceTo( ((ArrayType)intr).Elem );
+
+			if (IsMap() && intr.IsMap())
+				return ((MapType)this).Elem.DistanceTo( ((MapType)intr).Elem );
+
+			/*if (type.IsInline())
+			{
+				var inlineType = (InlineInterface)type;
+
+				foreach (var inlineMember in inlineType.Members)
+				{
+					var inlineSig = inlineMember.Signature();
+
+					var found = GetMember(inlineSig);
+					if (found)
+					{
+						if (!found.Type || found.Type.DistanceTo(inlineMember.Type) < 0)
+							return -1;
+					}
+					else
+						return -1;
+				}
+
+				return 1;
+			}*/
+
+			if (FullName == intr.FullName)
+				return 0;
+
+			return -1;
+		}
+
+		virtual Interface GetCommon(Interface intr)
+		{
+			if (!intr)
+				return null;
+
+			if (intr == this)
+				return this;
+
+			if (intr.DistanceTo(this) >= 0)
+				return this;
+
+			if (this.DistanceTo(intr) >= 0)
+				return intr;
+
+			return null;
+		}
+
+		Method GetMethodBySignature(string sig)
+		{
+			foreach (var member in _members)
+				if (member.IsMethod() && member.Signature() == sig)
+					return (Method)member;
+
+			return null;
+		}
+
+		virtual Method GetMethod(CallExpressionNode call, Scope scope, function<Method[]> onCompete)
+		{
+			// Check cache
+			var sig = call.Signature(scope);
+			if (_methodCache.HasKey(sig))
+				return _methodCache[sig];
+
+			// Slow method
+			Method[] methods = [];
+			foreach (var member in _members)
+				if (member.IsMethod())
+					methods.Add((Method)member);
+
+			// Get all matches and how closesly they match caller
+			array foundMatches = [];
+			foreach (var method in methods)
+			{
+				var match = method.GetMatch(call, scope);
+				if (match >= 0)
+					foundMatches.Add({method: method, score: match});
+			}
+
+			if (foundMatches.Length() == 0)
+				return null;
+			
+			// Start counting up and find matches with that score
+			for (int count = 0; count < 1000; count++)
+			{
+				Method[] winners = [];
+
+				foreach (var match in foundMatches)
+				{
+					if (match.score == count)
+						winners.Add((Method)match.method);
+				}
+
+				// We have found a/some winner(s)
+				// Stop searching and either return the winner or report competition
+				if (winners.Length() > 0)
+				{
+					if (winners.Length() > 1)
+					{
+						if (onCompete)
+							onCompete(winners);
+
+						return null;
+					}
+
+					_methodCache[sig] = winners[0];
+					return winners[0];
+				}
+			}
+
+			return null;
+		}
+
+		bool IsBasic()
+		{
+			return 	this == _voidType ||
+					this == _boolType ||
+					this == _charType ||
+					this == _intType ||
+					this == _floatType ||
+					this == _objectType ||
+					this == _stringType ||
+					this == _nullType;
+		}
+
+		virtual bool IsArray() { return false; }
+		virtual bool IsMap() { return false; }
+		virtual bool IsFunction() { return false; }
+		virtual bool IsEvent() { return false; }
+		virtual bool IsComplex() { return false; }
+		virtual bool IsInline() { return false; }
+
+		bool IsDefined = false;		// Has the interface been defined by the user
+		bool IsInterface() { return true; }
+		virtual bool IsClass() { return false; }
+		virtual bool IsEnum() { return false; }
+		virtual bool IsTypedef() { return false; }
+
+
+		ArrayType ArrayOf : private _arrayOf = null
+		{
+			get
+			{
+				if (!_arrayOf)
+				{
+					_arrayOf = new ArrayType(this);
+					EcoStdLib.CreateArrayMethods(_arrayOf);
+				}
+
+				return _arrayOf;
+			}
+		}
+
+		MapType MapOf : private _mapOf = null
+		{
+			get
+			{
+				if (!_mapOf)
+				{
+					_mapOf = new MapType(this);
+					EcoStdLib.CreateMapMethods(_mapOf);
+				}
+
+				return _mapOf;
+			}
+		}
+
+		static Interface VoidType : private _voidType
+		{
+			get
+			{
+				if (!_voidType)
+					_voidType = new Interface("void");
+
+				return _voidType;
+			}
+		}
+
+		static Interface BoolType : private _boolType
+		{
+			get
+			{
+				if (!_boolType)
+					_boolType = new Interface("bool");
+
+				return _boolType;
+			}
+		}
+
+		static Interface CharType : private _charType
+		{
+			get
+			{
+				if (!_charType)
+					_charType = new Interface("char");
+
+				return _charType;
+			}
+		}
+
+		static Interface IntType : private _intType
+		{
+			get
+			{
+				if (!_intType)
+					_intType = new Interface("int");
+
+				return _intType;
+			}
+		}
+
+		static Interface FloatType : private _floatType
+		{
+			get
+			{
+				if (!_floatType)
+					_floatType = new Interface("float");
+
+				return _floatType;
+			}
+		}
+
+		static Interface StringType : private _stringType
+		{
+			get
+			{
+				if (!_stringType)
+				{
+					_stringType = new Class("string");
+					((Class)_stringType).IsNative = true;
+					EcoStdLib.CreateStringMethods(_stringType);
+				}
+
+				return _stringType;
+			}
+		}
+
+		static Interface ObjectType : private _objectType
+		{
+			get
+			{
+				if (!_objectType)
+				{
+					_objectType = new Interface("object");
+					EcoStdLib.CreateObjectMethods(_objectType);
+				}
+
+				return _objectType;
+			}
+		}
+
+		static Interface NullType : private _nullType
+		{
+			get
+			{
+				if (!_nullType)
+					_nullType = new Interface("null");
+
+				return _nullType;
+			}
+		}
+
+
+		/** Generated package intialiser implements this interface */
+		static Interface PackageInterface : private _pckInterface
+		{
+			get
+			{
+				if (!_pckInterface)
+				{
+					_pckInterface = new Interface("IPackageInitialiser");
+					_pckInterface._imported = true;
+					EcoStdLib.CreatePackageInitialiserMethods(_pckInterface);
+				}
+
+				return _pckInterface;
+			}
+		}
+
+
+		/** Entry point */
+		static Interface EntryPoint : private _entryPoint
+		{
+			get
+			{
+				if (!_entryPoint)
+				{
+					_entryPoint = new Interface("IEntryPoint");
+					_entryPoint._imported = true;
+					EcoStdLib.CreateEntryPointMethods(_entryPoint);
+				}
+
+				return _entryPoint;
+			}
+		}
+
+
+		/** Serialize */
+		object Serialise()
+		{
+			var output = (map){type: "interface"};
+
+			var methods = [];
+			foreach (var member in _members)
+				methods.Add(member.Serialise());
+
+			output["methods"] = methods;
+
+			return output;
+		}
+
+		/** Serialise for objects that use this type */
+		virtual object SerialiseType()
+		{
+			if (IsBasic())
+				return {type: "basic", name: _name};
+
+			return {type: "interface", name: FullName};
+		}
+
+		/** Import interface skeleton */
+		static Interface ImportSkeleton(string name, object symbol, Namespace parent)
+		{
+			Interface intr = new Interface(name);
+			intr.Namespace = parent;
+			intr._imported = true;
+
+			return intr;
+		}
+
+
+		/** Full interface import */
+		static void ImportFull(Interface intr, object symbol)
+		{
+			// Members
+			var methods = (array)symbol["methods"];
+			foreach (var method in methods)
+				intr.AddMember(Method.ImportMethod(method, intr));
+		}
+
+
+		static map< Interface > BasicTypes()
+		{
+			if (!_basicTypes)
+			{
+				// Assign something to it now to prevent infinite recursion
+				_basicTypes = {};
+				_basicTypes = {
+					"void":		Interface.VoidType,
+					"bool":		Interface.BoolType,
+					"char":		Interface.CharType,
+					"int":		Interface.IntType,
+					"float":	Interface.FloatType,
+					"object":	Interface.ObjectType,
+					"string":	Interface.StringType
+				};
+
+			}
+
+			return _basicTypes;
+		}
+
+		static Interface ImportType(object node, Interface from)
+		{
+			var typeType = (string)node["type"];
+
+			if (typeType == "basic")
+				return BasicTypes()[(string)node["name"]];
+
+			else if (typeType == "class" || typeType == "interface" || typeType == "enum")
+			{
+				if (node["name"] == "string")
+					return Interface.StringType;
+				else
+					return from.GetType(TypeNode.Generate((string)node["name"]));
+			}
+
+			else if (typeType == "array")
+				return ImportType(node["elem"], from).ArrayOf;
+
+			else if (typeType == "map")
+				return ImportType(node["elem"], from).MapOf;
+
+			else if (typeType == "function")
+			{
+				var func = new FunctionType();
+				func.ReturnType = ImportType(node["return"], from);
+
+				var params = (array)node["params"];
+				foreach (var param in params)
+					func.AddParamType(ImportType(param, from));
+
+				return func;
+			}
+			else if (typeType == "event")
+			{
+				var evt = new EventType();
+				var params = (array)node["params"];
+				foreach (var param in params)
+					evt.AddParamType(ImportType(param, from));
+
+				//_eventTypes.Add(evt);
+				EcoStdLib.CreateEventMethods(evt);
+
+				return evt;
+			}
+
+			return null;
+		}
+
+	private:
+
+		static map<Interface> _basicTypes = null;
+
+		static int _typeIdCount = 0;
+		int _typeId;
+
+	}
+
+
+	/** Inline interface */
+	class InlineInterface : Interface
+	{
+		new() : base("type")
+		{
+		}
+
+		bool AddMember(Member member)
+		{
+			if (!member) return false;
+
+			var res = base.AddMember(member);
+
+			Name = "type{";
+
+			var getMemberName = function(Member mem):string {
+				string name = (mem.Type ? mem.Type.FullName : "<unknown>") + " " + mem.Name;
+				if (mem.IsMethod())
+				{
+					name += "(";
+					var methodMember = (Method)mem;
+					if (methodMember.Parameters.Length() > 0)
+					{
+						name += (methodMember.Parameters[0].Type ? methodMember.Parameters[0].Type.FullName : "<unknown>") + " " + methodMember.Parameters[0].Name;
+
+						for (int p = 1; p < methodMember.Parameters.Length(); p++)
+						{
+							name += ", " + (methodMember.Parameters[p].Type ? methodMember.Parameters[p].Type.FullName : "<unknown>") + " " + methodMember.Parameters[p].Name;
+						}
+					}
+					name += ")";
+				}
+
+				return name;
+			};
+
+			Name += getMemberName(Members[0]);
+
+			for (int m = 1; m < Members.Length(); m++)
+				Name += ", " + getMemberName(Members[m]);
+
+			Name += "}";
+
+			return res;
+		}
+
+		bool IsInline() { return true; }
+
+		int DistanceTo(Interface type)
+		{
+			if (!type)
+				return -1;
+
+			if (type == Interface.ObjectType)
+				return 1;
+
+			if (type.IsMap())
+			{
+				var mapType = (MapType)type;
+				var elem = mapType.Elem;
+				if (!elem)
+					return -1;
+
+				foreach (var member in Members)
+				{
+					if (!member.Type)
+						return -1;
+
+					if (member.Type.DistanceTo(elem) < 0)
+						return -1;
+				}
+
+				return 1;
+			}
+			else if (type.IsClass() || type.IsInline() || type.IsDefined)
+			{
+				//var inlineType = (InlineInterface)type;
+
+				int dist = 1;
+				foreach (var member in type.Members)
+				{
+					if (type.IsClass() && !member.IsField())
+						continue;
+
+					if (!member.Type)
+						return -1;
+
+					var found = GetMember(member.Signature());
+					if (!found)
+					{
+						found = GetMemberByName(member.Name);
+						if (!found)
+							return -1;
+						else
+						{
+							if (member.IsMethod() && !found.Type.IsFunction())
+								return -1;
+							else
+							{
+								var methodMember = (Method)member;
+								var foundFuncType = (FunctionType)found.Type;
+
+								if (!foundFuncType.ReturnType)
+									return -1;
+
+								if (foundFuncType.ReturnType.DistanceTo( member.Type) < 0)
+									return -1;
+
+								if (foundFuncType.ParamTypes.Length() != methodMember.Parameters.Length())
+									return -1;
+
+								for (int p = 0; p < methodMember.Parameters.Length(); p++)
+								{
+									if (!foundFuncType.ParamTypes[p] || !methodMember.Parameters[p].Type)
+										return -1;
+
+									if (foundFuncType.ParamTypes[p].DistanceTo( methodMember.Parameters[p].Type ) < 0)
+										return -1;
+								}
+							}
+						}
+					}
+					else
+					{
+						if (!found.Type)
+							return -1;
+						else if (found.Type.DistanceTo(member.Type) < 0)
+							return -1;
+					}
+
+					dist++;
+				}
+
+				return dist;
+			}
+			else return -1;
+
+			return 1;
+		}
+	}
+
+
+	/** Class */
+	class Class : Interface
+	{
+		new(string name) : base(name)
+		{
+			_symbolType = SymbolType.Class;
+			_interfaces = [];
+			_isNative = false;
+			_subClasses = [];
+		}
+
+		Class BaseClass : protected _baseClass
+		{
+			get return _baseClass;
+			set
+			{
+				_baseClass = value;
+				_subClasses.Add(value);
+			}
+		}
+
+		Class[] SubClasses : private _subClasses
+		{
+			get return _subClasses;
+		}
+
+		int ClassDepth
+		{
+			get
+			{
+				if (!_baseClass) return 0;
+				int depth = 0;
+
+				var cur = _baseClass;
+				while (cur)
+				{
+					depth++;
+					cur = cur._baseClass;
+				}
+
+				return depth;
+			}
+		}
+
+		Interface[] Interfaces : protected _interfaces
+		{
+			get return _interfaces;
+		}
+
+		void AddInterface(Interface i)
+		{
+			if (!_interfaces.Contains(i))
+				_interfaces.Add(i);
+		}
+
+		bool IsNative : protected _isNative
+		{
+			get return _isNative;
+			set _isNative = value;
+		}
+
+		bool CastsTo(LitMapExpressionNode mapNode, Scope scope)
+		{
+			if (!IsInline() && !IsClass() && !IsDefined) return false;
+			 
+			foreach (var member in Members)
+			{
+				if (!member.IsField()) continue;
+
+				if (!member.Type) return false;
+
+				if (!mapNode.Items.HasKey(member.Name))
+					return false;
+
+				var mapItem = mapNode.Items[member.Name];
+
+				if (member.IsMethod())
+				{
+					if (mapItem.ExprType != ExpressionType.Function)
+						return false;
+
+					var valueFuncType = (FunctionType)mapItem.GetTypeOf(scope, null);
+					if (!valueFuncType) return false;
+
+					if (!valueFuncType.ReturnType || valueFuncType.ReturnType.DistanceTo(member.Type) < 0)
+						return false;
+
+					var methodMember = (Method)member;
+					if (valueFuncType.ParamTypes.Length() != methodMember.Parameters.Length())
+						return false;
+
+					for (int p = 0; p < valueFuncType.ParamTypes.Length(); p++)
+					{
+						if (!valueFuncType.ParamTypes[p] || !methodMember.Parameters[p].Type)
+							return false;
+
+						if (valueFuncType.ParamTypes[p].DistanceTo(methodMember.Parameters[p].Type) < 0)
+							return false;
+					}
+				}
+				else
+				{
+					var valueType = mapItem.GetTypeOf(scope, null);
+					if (!valueType) return false;
+
+					if (member.Type.IsClass() || member.Type.IsInline() || member.Type.IsDefined)
+					{
+						if (mapItem.ExprType != ExpressionType.Map)
+							return false;
+
+						if (!member.Type.CastsTo( (LitMapExpressionNode)mapItem, scope) )
+							return false;
+					}
+					else if (valueType.DistanceTo(member.Type) < 0)
+						return false;
+				}
+			}
+
+			return true;
+		}
+
+		int DistanceTo(Interface type)
+		{
+			if (!type) return -1;
+
+			if (type == Interface.NullType || type == Interface.ObjectType)
+				return 1;
+
+			if (type.IsInline())
+			{
+				var inlineType = (InlineInterface)type;
+
+				foreach (var inlineMember in inlineType.Members)
+				{
+					var inlineSig = inlineMember.Signature();
+
+					var found = GetMember(inlineSig);
+					if (found)
+					{
+						if (!found.Type || found.Type.DistanceTo(inlineMember.Type) < 0)
+							return -1;
+					}
+					else
+						return -1;
+				}
+
+				return 1;
+			}
+
+			int dist = 0;
+			Class cur = this;
+
+			while (cur)
+			{
+				if (cur == type)
+					return dist;
+				else
+				{
+					foreach (var intr in cur._interfaces)
+					{
+						int tmp = intr.DistanceTo(type);
+
+						if (tmp >= 0)
+							return tmp + 1;
+					}
+				}
+
+				dist++;
+				cur = cur._baseClass;
+			}
+
+			foreach (var intr in _interfaces)
+			{
+				dist = intr.DistanceTo(type);
+				if (dist >= 0)
+					return dist + 1;
+
+			}
+
+			if (type.FullName == FullName)
+				return 0;
+			
+			return -1;
+		}
+
+		Interface GetCommon(Interface type)
+		{
+			var common = base.GetCommon(type);
+			if (common)
+				return common;
+
+			var baseClass = _baseClass;
+			while (baseClass)
+			{
+				if (type.DistanceTo(baseClass) >= 0)
+					return baseClass;
+
+				baseClass = baseClass._baseClass;
+			}
+
+			return null;
+		}
+
+		Method GetMethod(CallExpressionNode call, Scope scope, function<Method[]> onCompete)
+		{
+			var found = base.GetMethod(call, scope, onCompete);
+			if (found)
+				return found;
+
+			if (_baseClass)
+				return _baseClass.GetMethod(call, scope, onCompete);
+
+			return null;
+		}
+
+		bool IsComplex() { return true; }
+		bool IsClass() { return true; }
+		bool IsComponent() { return IsServerComponent() || IsClientComponent(); }
+		virtual bool IsServerComponent() { return false; }
+		virtual bool IsClientComponent() { return false; }
+		virtual bool IsInitialiser() { return false; }
+		virtual bool IsService() { return false; }
+
+		bool HasSerialisationMethods : private _hasSerialisationMethods
+		{
+			get return _hasSerialisationMethods;
+			set _hasSerialisationMethods = value;
+		}
+
+
+		// Get new() without parameters, if it exists
+		Constructor BasicConstructor()
+		{
+			foreach (var member in _members)
+			{
+				if (member.IsConstructor())
+				{
+					var constr = (Constructor)member;
+					if (constr.Parameters.Length() == 0)
+						return constr;
+				}
+			}
+
+			return null;
+		}
+
+
+		Member[] GetAllMembers()
+		{
+			Member[] members = [];
+
+			if (_baseClass)
+				members = _baseClass.GetAllMembers();
+
+			foreach (var member in _members)
+				members.Add(member);
+
+			return members;
+		}
+
+		Member[] GetMembersAccessibleFrom(Method method)
+		{
+			Member[] members = [];
+
+			if (_baseClass)
+				members = _baseClass.GetMembersAccessibleFrom(method);
+
+			foreach (var member in _members)
+				if (member.AccessibleFrom(method))
+					members.Add(member);
+
+			return members;
+		}
+
+		bool AddMember(Member member)
+		{
+			var found = GetMember(member.Signature());
+
+			_members.Add(member);
+			member.Owner = this;
+
+
+			if (member.IsMethod())
+				((Method)member).Overload = GetOverload(member.Name) - 1;
+
+			if (found)
+			{
+				if (found.Owner == this)
+					return false;
+
+				if (found.IsMethod())
+				{
+					var method = (Method)found;
+
+					if (!method.IsConstructor())
+					{
+						if (method.Virtual)
+						{
+							((Method)member).Virtual = true;
+							((Method)member).Override = method;
+							((Method)member).Overload = 0;
+						}
+						else
+							((Method)member).Overload = method.Overload + 1;
+					}
+				}
+			}
+
+			return true;
+		}
+
+
+		Member GetMember(string signature)
+		{
+			var found = base.GetMember(signature);
+			if (found)
+				return found;
+
+			if (_baseClass)
+				return _baseClass.GetMember(signature);
+
+			return null;
+		}
+
+		// Checks for member but starts from top of class hierarchy
+		Member GetMemberFromTop(string signature)
+		{
+			if (_baseClass)
+			{
+				var found = _baseClass.GetMemberFromTop(signature);
+				if (found)
+					return found;
+			}
+
+			var found = base.GetMember(signature);
+			if (found)
+				return found;
+
+			return null;
+		}
+
+		Member GetMemberByName(string name)
+		{
+			var found = base.GetMemberByName(name);
+			if (found)
+				return found;
+
+			if (_baseClass)
+				return _baseClass.GetMemberByName(name);
+
+			return null;
+		}
+
+		Member[] GetMembersByName(string name)
+		{
+			var members = base.GetMembersByName(name);
+
+			if (_baseClass)
+			{
+				var baseMembers = _baseClass.GetMembersByName(name);
+				foreach (var baseMember in baseMembers)
+					members.Enque(baseMember);
+			}
+			
+			return members;
+		}
+
+
+		int GetOverload(string name) // overloading Interface.GetOverload()
+		{
+			int overload = base.GetOverload(name);
+
+			if (_baseClass)
+				overload += _baseClass.GetOverload(name);
+
+			return overload;
+		}
+
+
+		/** Serialise type */
+		object SerialiseType()
+		{
+			return {type: "class", name: FullName};
+		}
+
+		/** Serialize */
+		object Serialise()
+		{
+			var output = (map){type: "class", isNative: _isNative};
+
+			if (_baseClass)
+				output["baseClass"] = _baseClass.FullName;
+
+			if (_interfaces.Length() > 0)
+			{
+				var interfaceJson = [];
+
+				foreach (var intr in _interfaces)
+					interfaceJson.Add(intr.FullName);
+
+				output["interfaces"] = interfaceJson;
+			}
+
+			var members = [];
+			foreach (var member in _members)
+				members.Add(member.Serialise());
+
+			output["members"] = members;
+
+			return output;
+		}
+
+
+		/** Import class skeleton */
+		static Class ImportSkeleton(string name, object symbol, Namespace parent)
+		{
+			var cls = new Class(name);
+
+			cls.Namespace = parent;
+			cls._imported = true;
+
+			return cls;
+		}
+
+
+		/** Import full */
+		static void ImportFull(Class cls, object symbol)
+		{
+
+			// Check if native
+			if (((map)symbol).HasKey("isNative") && symbol["isNative"])
+				cls.IsNative = true;
+
+			// Base class
+			if (((map)symbol).HasKey("baseClass"))
+			{
+				var baseName = (string)symbol["baseClass"];
+
+				cls.BaseClass = (Class)cls.GetRootNamespace().GetInterfaceFromTypeNode(TypeNode.Generate(baseName));
+			}
+
+			// Interfaces
+			if (((map)symbol).HasKey("interfaces"))
+			{
+				var interfaceNames = (string[])symbol["interfaces"];
+				
+				foreach (var interfaceName in interfaceNames)
+				{
+					// Create fake type node from base name
+					var parts = interfaceName.Split(".");
+                    var firstPart = parts[0];
+                    parts.Remove(0);
+					var typeNode = new TypeNode(firstPart);
+
+					while (parts.Length() > 0)
+					{
+                        firstPart = parts[0];
+                        parts.Remove(0);
+						var newNode = new TypeNode(firstPart);
+						newNode.Parent = typeNode;
+						typeNode = newNode;
+					}
+
+					cls.AddInterface(cls.GetInterfaceFromTypeNode(typeNode));
+				}
+			}
+
+
+			// Members
+			var members = (array)symbol["members"];
+			foreach (var member in members)
+			{
+				var memberType = (string)member["memberType"];
+
+				if (memberType == "field")
+					cls.AddMember(Field.ImportField(member, cls));
+
+				else if (memberType == "method")
+					cls.AddMember(Method.ImportMethod(member, cls));
+
+				else if (memberType == "constructor")
+					cls.AddMember(Constructor.ImportConstructor(member, cls));
+
+				else if (memberType == "property")
+					cls.AddMember(Property.ImportProperty(member, cls));
+			}
+		}
+
+	}
+
+
+	/** Template */
+	class Template : Class
+	{
+		new(string name) : base(name)
+		{
+			_symbolType = SymbolType.Template;
+			_parameters = [];
+		}
+
+		MethodParameter[] Parameters : private _parameters
+		{
+			get return _parameters;
+		}
+
+		void AddParameter(Interface type, string name, object defaultValue)
+		{
+			_parameters.Add(new MethodParameter(type, name, defaultValue));
+		}
+
+		object Serialise()
+		{
+			var output = (map){type: "template"};
+			output["method"] = _members[0].Serialise();
+
+			var attrs = [];
+			foreach (var attr in _parameters)
+				attrs.Add(attr.Serialise());
+
+			output["attrs"] = attrs;
+
+			return output;
+		}
+
+
+		/** Import template skeleton */
+		static Template ImportSkeleton(string name, object symbol, Namespace parent)
+		{
+			var templ = new Template(name);
+
+			templ.Namespace = parent;
+			templ._imported = true;
+
+			return templ;
+		}
+
+
+		/** Import full */
+		static void ImportFull(Template templ, object symbol)
+		{
+			// Attributes
+			var attrs = (array)symbol["attrs"];
+			foreach (var attr in attrs)
+				templ.AddParameter(Interface.ImportType(attr["type"], templ), (string)attr["name"], attr["defaultValue"]);
+
+			// Main method
+			templ.AddMember(Method.ImportMethod(symbol["method"], templ));
+		}
+	}
+
+
+	/** Array type */
+	class ArrayType : Class
+	{
+		new(Interface elem) : base(elem.Name + "[]")
+		{
+			_elem = elem;
+			_isNative = true;
+		}
+
+		Interface Elem : private _elem
+		{
+			get return _elem;
+		}
+
+		int DistanceTo(Interface type)
+		{
+			if (type == Interface.ObjectType)
+				return 1;
+
+			if (type.IsArray())
+				return _elem.DistanceTo(((ArrayType)type).Elem);
+
+			return -1;
+		}
+
+		bool CastsTo(LitArrayExpressionNode node, Scope scope)
+		{
+			var elem = _elem;
+
+			foreach (var item in node.Items)
+			{
+				var itemType = item.GetTypeOf(scope);
+				if (!itemType || itemType.DistanceTo(elem) < 0)
+					return false;
+			}
+
+			return true;
+		}
+
+		string CompiledName()
+		{
+			return "array";
+		}
+
+		string DetailName()
+		{
+			return _elem.DetailName() + "[]";
+		}
+
+		object SerialiseType()
+		{
+			return {type: "array", elem: _elem ? _elem.SerialiseType() : null};
+		}
+
+		bool IsComplex() { return true; }
+		bool IsArray() { return true; }
+	}
+
+	/** Map type */
+	class MapType : Class
+	{
+		new(Interface elem) : base("map<" + elem.Name + ">")
+		{
+			_elem = elem;
+			_isNative = true;
+		}
+
+		Interface Elem : private _elem
+		{
+			get return _elem;
+		}
+
+
+		int DistanceTo(Interface type)
+		{
+			if (type == Interface.ObjectType)
+				return 1;
+
+			if (type.IsMap())
+				return _elem.DistanceTo(((MapType)type).Elem);
+
+			return -1;
+		}
+
+		bool CastsTo(LitMapExpressionNode node, Scope scope)
+		{
+			var elem = _elem;
+
+			foreach (var key in node.Items.Keys())
+			{
+				var val = node.Items[key];
+
+				var itemType = val.GetTypeOf(scope);
+				if (!itemType || itemType.DistanceTo(elem) < 0)
+					return false;
+			}
+
+			return true;
+		}
+
+		string CompiledName()
+		{
+			return "map";
+		}
+
+		string DetailName()
+		{
+			return "map<" + _elem.DetailName() + ">";
+		}
+
+		object SerialiseType()
+		{
+			return {type: "map", elem: _elem ? _elem.SerialiseType() : null};
+		}
+
+		bool IsComplex() { return true; }
+		bool IsMap() { return true; }
+	}
+
+
+	/** Event type */
+	class EventType : Class
+	{
+		new() : base("event")
+		{
+			_paramTypes = [];
+			_isNative = true;
+		}
+
+		string CompiledName()
+		{
+			return "event";
+		}
+
+		string DetailName()
+		{
+			var signature = "event<";
+
+			int count = 0;
+			foreach (var paramType in _paramTypes)
+			{
+				if (count > 0) signature += ",";
+				signature += paramType.DetailName();
+				count++;
+			}
+
+			return signature + ">";
+		}
+
+		string Signature()
+		{
+			var signature = "event<";
+
+			int count = 0;
+			foreach (var paramType in _paramTypes)
+			{
+				if (count > 0) signature += ",";
+				signature += paramType.Signature();
+				count++;
+			}
+
+			return signature + ">";
+		}
+
+		Interface[] ParamTypes : private _paramTypes
+		{
+			get return _paramTypes;
+		}
+
+		void AddParamType(Interface type)
+		{
+			_paramTypes.Add(type);
+		}
+
+		int DistanceTo(Interface type)
+		{
+			if (type == Interface.ObjectType)
+				return 1;
+
+			if (!type.IsEvent())
+				return -1;
+
+			var eventType = (EventType)type;
+
+			var params = eventType.ParamTypes;
+			var args = _paramTypes;
+
+			if (params.Length() != args.Length())
+				return -1;
+
+			int diff = 0;
+
+			for (int p = 0; p < params.Length(); p++)
+			{
+				int dist = args[p].DistanceTo(params[p]);
+				if (dist < 0)
+					return -1;
+
+				diff += dist;
+			}
+
+			return diff;
+		}
+
+
+		object SerialiseType()
+		{
+			var paramTypes = [];
+			foreach (var param in _paramTypes)
+				if (param)
+					paramTypes.Add(param.SerialiseType());
+				else
+					paramTypes.Add(null);
+
+			return {type: "event", params: paramTypes};
+		}
+
+		bool IsComplex() { return true; }
+		bool IsEvent() { return true; }
+	}
+
+
+	/** Function type */
+	class FunctionType : Interface
+	{
+		new() : base("function<>")
+		{
+			_return = Interface.ObjectType;
+			_paramTypes = [];
+			_paramNames = [];
+		}
+
+		Interface ReturnType : private _return
+		{
+			get return _return;
+			set
+			{
+				_return = value;
+
+				_name = "function<";
+				int count = 0;
+				foreach (var ptype in _paramTypes)
+				{
+					if (count > 0)
+						_name += ",";
+					if (ptype)
+						_name += ptype.Name;
+					else
+						_name += "(unknown)";
+					count++;
+				}
+				_name += ">";
+
+				if (_return)
+				{
+					if (_return != Interface.VoidType)
+						_name += ":" + _return.Name;
+				}
+				else
+					_name += ":<unknown>";
+			}
+		}
+
+		Interface[] ParamTypes : private _paramTypes
+		{
+			get return _paramTypes;
+		}
+
+		string[] ParamNames : private _paramNames
+		{
+			get return _paramNames;
+		}
+
+		void AddParamType(Interface type)
+		{
+			if (type.Name == "Faba")
+				:console.trace();
+
+			_paramTypes.Add(type);
+			_paramNames.Add("p" + _paramTypes.Length());
+
+			_name = "function<";
+			int count = 0;
+			foreach (var ptype in _paramTypes)
+			{
+				if (count > 0)
+					_name += ",";
+				if (ptype)
+					_name += ptype.Name;
+				else
+					_name += "(unknown)";
+				count++;
+			}
+			_name += ">";
+
+			if (_return)
+			{
+				if (_return != Interface.VoidType)
+					_name += ":" + _return.Name;
+			}
+			else
+				_name += ":<unknown>";
+		}
+
+		void AddParam(Interface type, string name)
+		{
+			_paramTypes.Add(type);
+			_paramNames.Add(name);
+
+			_name = "function<";
+			int count = 0;
+			foreach (var ptype in _paramTypes)
+			{
+				if (count > 0)
+					_name += ",";
+				if (ptype)
+					_name += ptype.Name;
+				else
+					_name += "(unknown)";
+				count++;
+			}
+			_name += ">";
+
+			if (_return)
+			{
+				if (_return != Interface.VoidType)
+					_name += ":" + _return.Name;
+			}
+			else
+				_name += ":<unknown>";
+		}
+
+		int DistanceTo(Interface type)
+		{
+			if (!type)
+				return -1;
+
+			if (type == Interface.ObjectType)
+				return 1;
+
+			if (!type.IsFunction())
+				return -1;
+
+			var funcType = (FunctionType)type;
+
+			if (!funcType.ReturnType)
+				return -1;
+
+			if (funcType.ReturnType != Interface.ObjectType && funcType.ReturnType.DistanceTo(ReturnType) < 0)
+				return -1;
+
+			var params = funcType.ParamTypes;
+			var args = _paramTypes;
+
+			if (params.Length() != args.Length())
+				return -1;
+
+			int diff = 0;
+
+			for (int p = 0; p < params.Length(); p++)
+			{
+				if (!args[p])
+					return -1;
+
+				int dist = args[p].DistanceTo(params[p]);
+				if (dist < 0)
+					return -1;
+
+				diff += dist;
+			}
+
+			return diff;
+		}
+
+		bool CastsTo(FunctionTypeNode func, Scope scope)
+		{
+			if (_paramTypes.Length() != func.ParamTypes.Length())
+				return false;
+
+			var returnType = Interface.ObjectType;
+			if (func.ReturnType)
+				returnType = scope.OwnerMethod.Owner.GetType(func.ReturnType);
+
+			if (!returnType)
+				return false;
+
+			if (_return && returnType.DistanceTo(_return) < 0)
+				return false;
+
+			for (int p = 0; p < func.ParamTypes.Length(); p++)
+			{
+				var paramType = _paramTypes[p];
+				var argType = scope.OwnerMethod.Owner.GetType(func.ParamTypes[p]);
+
+				if (argType.DistanceTo(paramType) < 0)
+					return false;
+			}
+
+			return true;
+		}
+
+		bool CastsTo(FunctionExpressionNode func, Scope scope)
+		{
+			if (_paramTypes.Length() != func.Params.Length())
+				return false;
+
+			var returnType = Interface.ObjectType;
+			if (func.ReturnType)
+				returnType = scope.OwnerMethod.Owner.GetType(func.ReturnType);
+
+			if (!returnType)
+				return false;
+			
+			if (returnType.DistanceTo(_return) < 0)
+				return false;
+
+			for (int p = 0; p < func.Params.Length(); p++)
+			{
+				var paramType = _paramTypes[p];
+				var argType = scope.OwnerMethod.Owner.GetType( (TypeNode)func.Params[p].type );
+
+				if (argType.DistanceTo(paramType) < 0)
+					return false;
+			}
+
+			return true;
+		}
+
+		string CompiledName()
+		{
+			var signature = "function_";
+
+			int count = 0;
+			foreach (var param in _paramTypes)
+			{
+				if (count > 0) signature += ", ";
+				if (param)
+					signature += param.CompiledName();
+				else
+					signature += "(unknown)";
+				count++;
+			}
+
+			return signature + ((_return && _return != Interface.VoidType) ? ("__" + _return.CompiledName()) : "");
+		}
+
+		string DetailName()
+		{
+			var signature = "function<";
+
+			int count = 0;
+			foreach (var param in _paramTypes)
+			{
+				if (count > 0) signature += ", ";
+
+				if (param)
+					signature += param.DetailName();
+				else
+					signature += "(unknown)";
+
+				count++;
+			}
+
+			return signature + ">" + ((_return && _return != Interface.VoidType) ? (":" + _return.DetailName()) : "");
+		}
+
+		string Signature()
+		{
+			var signature = "function<";
+
+			int count = 0;
+			foreach (var param in _paramTypes)
+			{
+				if (count > 0) signature += ", ";
+
+				if (param)
+					signature += param.Signature();
+				else
+					signature += "(unknown)";
+				count++;
+			}
+
+			return signature + ">" + ((_return && _return != Interface.VoidType) ? (":" + _return.DetailName()) : "");
+		}
+
+		string GetInsertSnippet(object counter)
+		{
+			var snippet = "function(";
+            counter.count = counter.count + 1;
+
+			int count = 0;
+			int startCount = (int)counter.count;
+			for (int p = 0; p < _paramTypes.Length(); p++)
+			{
+				var param = _paramTypes[p];
+
+				if (counter.count > startCount) snippet += ", ";
+
+				if (param)
+					snippet += param.Signature() + ' ${' + (int)counter.count + ":" + _paramNames[p] + "}";
+				else
+					snippet += "unknown " + ' ${' + (int)counter.count + ":" + _paramNames[p] + "}";
+
+				counter.count = counter.count + 1;
+				count++;
+			}
+
+			snippet += ")";
+
+			if (_return && _return != Interface.VoidType && _return != Interface.ObjectType)
+				snippet += ":" + _return.Signature();
+
+			return snippet + " {$" + (int)counter.count + "}";
+		}
+
+		object SerialiseType()
+		{
+			var paramTypes = [];
+			foreach (var param in _paramTypes)
+				if (param)
+					paramTypes.Add(param.SerialiseType());
+				else
+					paramTypes.Add(null);
+
+			return {type: "function", "return": _return ? _return.SerialiseType() : null, params: paramTypes};
+		}
+
+		bool IsComplex() { return true; }
+		bool IsFunction() { return true; }
+
+
+		static FunctionType Create(Interface[] paramTypes, Interface returnType = null)
+		{
+			if (!returnType) returnType = Interface.VoidType;
+
+			var funcType = new FunctionType();
+			funcType.ReturnType = returnType;
+
+			foreach (var param in paramTypes)
+				funcType.AddParamType(param);
+
+			return funcType;
+		}
+	}
+
+
+	/** Server component */
+	class ServerComponent : Class
+	{
+		new(string name) : base(name)
+		{
+			_symbolType = SymbolType.ServerComponent;
+		}
+
+		ServerRender RenderMethod : private _renderMethod
+		{
+			get return _renderMethod;
+			set _renderMethod = value;
+		}
+
+		object Serialise()
+		{
+			var output = (map){type: "server-comp"};
+
+			var usings = [];
+			foreach (var used in _usings)
+				usings.Add(used.FullName);
+			output["usings"] = usings;
+
+			if (_baseClass)
+				output["baseClass"] = _baseClass.FullName;
+
+			if (_interfaces.Length() > 0)
+			{
+				var interfaceJson = [];
+
+				foreach (var intr in _interfaces)
+					interfaceJson.Add(intr.FullName);
+
+				output["interfaces"] = interfaceJson;
+			}
+
+			var members = [];
+			foreach (var member in _members)
+				members.Add(member.Serialise());
+
+			output["members"] = members;
+
+			return output;
+		}
+
+		/** Import component skeleton */
+		static ServerComponent ImportSkeleton(string name, object symbol, Namespace parent)
+		{
+			var comp = new ServerComponent(name);
+
+			comp.Namespace = parent;
+			comp._imported = true;
+
+			return comp;
+		}
+
+		/** Import full */
+		static void ImportFull(ServerComponent comp, object symbol)
+		{
+
+			// Usings
+			var usings  = (array)symbol["usings"];
+			foreach (var used in usings)
+				comp.UseNamespace(comp.GetNamespaceFromTypeNode(TypeNode.Generate((string)used)));
+
+			// Base class
+			if (((map)symbol).HasKey("baseClass"))
+			{
+				var baseName = (string)symbol["baseClass"];
+				comp.BaseClass = (Class)comp.GetInterfaceFromTypeNode(TypeNode.Generate(baseName));
+			}
+
+
+			// Interfaces
+			if (((map)symbol).HasKey("interfaces"))
+			{
+				var interfaces = (string[])symbol["interfaces"];
+
+				foreach (var intr in interfaces)
+					comp.AddInterface(comp.GetInterfaceFromTypeNode(TypeNode.Generate(intr)));
+			}
+
+			// Members
+			var members = (array)symbol["members"];
+			foreach (var member in members)
+			{
+				var memberType = (string)member["memberType"];
+
+				if (memberType == "field")
+					comp.AddMember(Field.ImportField(member, comp));
+
+				else if (memberType == "method")
+					comp.AddMember(Method.ImportMethod(member, comp));
+
+				else if (memberType == "server-render")
+				{
+					var serverRender = ServerRender.ImportServerRender(member, comp);
+					comp.AddMember(serverRender);
+					comp.RenderMethod = serverRender;
+				}
+
+				else if (memberType == "constructor")
+					comp.AddMember(Constructor.ImportConstructor(member, comp));
+
+				else if (memberType == "property")
+					comp.AddMember(Property.ImportProperty(member, comp));
+			}
+		}
+
+		bool IsServerComponent() { return true; }
+	}
+
+
+	/** Initialiser */
+	class Initialiser : Class
+	{
+		new(string name) : base(name)
+		{
+			_symbolType = SymbolType.Initialiser;
+		}
+
+		object Serialise()
+		{
+			var output = (map){type: "init"};
+
+			var usings = [];
+			foreach (var used in _usings)
+				usings.Add(used.FullName);
+			output["usings"] = usings;
+
+			if (_baseClass)
+				output["baseClass"] = _baseClass.FullName;
+
+			if (_interfaces.Length() > 0)
+			{
+				var interfaceJson = [];
+
+				foreach (var intr in _interfaces)
+					interfaceJson.Add(intr.FullName);
+
+				output["interfaces"] = interfaceJson;
+			}
+
+			var members = [];
+			foreach (var member in _members)
+				members.Add(member.Serialise());
+
+			output["members"] = members;
+
+			return output;
+		}
+
+		static Initialiser ImportSkeleton(string name, object symbol, Namespace parent)
+		{
+			var init = new Initialiser(name);
+
+			init.Namespace = parent;
+			init._imported = true;
+
+			return init;
+		}
+
+		static void ImportFull(Initialiser init, object symbol)
+		{
+			// Usings
+			var usings  = (array)symbol["usings"];
+			foreach (var used in usings)
+				init.UseNamespace(init.GetNamespaceFromTypeNode(TypeNode.Generate((string)used)));
+
+			// Base class
+			if (((map)symbol).HasKey("baseClass"))
+			{
+				var baseName = (string)symbol["baseClass"];
+				init.BaseClass = (Class)init.GetInterfaceFromTypeNode(TypeNode.Generate(baseName));
+			}
+
+
+			// Interfaces
+			if (((map)symbol).HasKey("interfaces"))
+			{
+				var interfaces = (string[])symbol["interfaces"];
+
+				foreach (var intr in interfaces)
+					init.AddInterface(init.GetInterfaceFromTypeNode(TypeNode.Generate(intr)));
+			}
+
+			// Members
+			var members = (array)symbol["members"];
+			foreach (var member in members)
+			{
+				var memberType = (string)member["memberType"];
+
+				if (memberType == "field")
+					init.AddMember(Field.ImportField(member, init));
+
+				else if (memberType == "method")
+					init.AddMember(Method.ImportMethod(member, init));
+
+				else if (memberType == "constructor")
+					init.AddMember(Constructor.ImportConstructor(member, init));
+
+				else if (memberType == "property")
+					init.AddMember(Property.ImportProperty(member, init));
+			}
+		}
+
+		bool IsInitialiser() { return true; }
+	}
+
+
+	/** Service */
+	class Service : Class
+	{
+		new(string name) : base(name)
+		{
+			_symbolType = SymbolType.Service;
+		}
+
+		object Serialise()
+		{
+			var output = (map){type: "service"};
+
+			var usings = [];
+			foreach (var used in _usings)
+				usings.Add(used.FullName);
+			output["usings"] = usings;
+
+			if (_baseClass)
+				output["baseClass"] = _baseClass.FullName;
+
+			if (_interfaces.Length() > 0)
+			{
+				var interfaceJson = [];
+
+				foreach (var intr in _interfaces)
+					interfaceJson.Add(intr.FullName);
+
+				output["interfaces"] = interfaceJson;
+			}
+
+			var members = [];
+			foreach (var member in _members)
+				members.Add(member.Serialise());
+
+			output["members"] = members;
+
+			return output;
+		}
+
+		static Service ImportSkeleton(string name, object symbol, Namespace parent)
+		{
+			var serv = new Service(name);
+
+			serv.Namespace = parent;
+			serv._imported = true;
+
+			return serv;
+		}
+
+		static void ImportFull(Service serv, object symbol)
+		{
+			// Usings
+			var usings  = (array)symbol["usings"];
+			foreach (var used in usings)
+				serv.UseNamespace(serv.GetNamespaceFromTypeNode(TypeNode.Generate((string)used)));
+
+			// Base class
+			if (((map)symbol).HasKey("baseClass"))
+			{
+				var baseName = (string)symbol["baseClass"];
+				serv.BaseClass = (Class)serv.GetInterfaceFromTypeNode(TypeNode.Generate(baseName));
+			}
+
+
+			// Interfaces
+			if (((map)symbol).HasKey("interfaces"))
+			{
+				var interfaces = (string[])symbol["interfaces"];
+
+				foreach (var intr in interfaces)
+					serv.AddInterface(serv.GetInterfaceFromTypeNode(TypeNode.Generate(intr)));
+			}
+
+			// Members
+			var members = (array)symbol["members"];
+			foreach (var member in members)
+			{
+				var memberType = (string)member["memberType"];
+
+				if (memberType == "field")
+					serv.AddMember(Field.ImportField(member, serv));
+
+				else if (memberType == "method")
+					serv.AddMember(Method.ImportMethod(member, serv));
+
+				else if (memberType == "constructor")
+					serv.AddMember(Constructor.ImportConstructor(member, serv));
+
+				else if (memberType == "property")
+					serv.AddMember(Property.ImportProperty(member, serv));
+			}
+		}
+
+		bool IsService() { return true; }
+	}
+
+
+	/** Client component */
+	class ClientComponent : Class
+	{
+		new(string name) : base(name)
+		{
+			_symbolType = SymbolType.ClientComponent;
+		}
+
+		object Serialise()
+		{
+			var output = (map){type: "client-comp"};
+
+			var usings = [];
+			foreach (var used in _usings)
+				usings.Add(used.FullName);
+			output["usings"] = usings;
+
+			if (_baseClass)
+				output["baseClass"] = _baseClass.FullName;
+
+			if (_interfaces.Length() > 0)
+			{
+				var interfaceJson = [];
+
+				foreach (var intr in _interfaces)
+					interfaceJson.Add(intr.FullName);
+
+				output["interfaces"] = interfaceJson;
+			}
+
+			var members = [];
+			foreach (var member in _members)
+				members.Add(member.Serialise());
+
+			output["members"] = members;
+
+			return output;
+		}
+
+
+		/** Import component skeleton */
+		static ClientComponent ImportSkeleton(string name, object symbol, Namespace parent)
+		{
+			var comp = new ClientComponent(name);
+
+			comp.Namespace = parent;
+			comp._imported = true;
+
+			return comp;
+		}
+
+		/** Import full */
+		static void ImportFull(ClientComponent comp, object symbol)
+		{
+			// Usings
+			var usings  = (array)symbol["usings"];
+			foreach (var used in usings)
+				comp.UseNamespace(comp.GetNamespaceFromTypeNode(TypeNode.Generate((string)used)));
+
+			// Base class
+			if (((map)symbol).HasKey("baseClass"))
+			{
+				var baseName = (string)symbol["baseClass"];
+				comp.BaseClass = (Class)comp.GetInterfaceFromTypeNode(TypeNode.Generate(baseName));
+			}
+
+
+			// Interfaces
+			if (((map)symbol).HasKey("interfaces"))
+			{
+				var interfaces = (string[])symbol["interfaces"];
+
+				foreach (var intr in interfaces)
+					comp.AddInterface(comp.GetInterfaceFromTypeNode(TypeNode.Generate(intr)));
+			}
+
+			// Members
+			var members = (array)symbol["members"];
+			foreach (var member in members)
+			{
+				var memberType = (string)member["memberType"];
+
+				if (memberType == "field")
+					comp.AddMember(Field.ImportField(member, comp));
+
+				else if (memberType == "method")
+					comp.AddMember(Method.ImportMethod(member, comp));
+
+				else if (memberType == "constructor")
+					comp.AddMember(Constructor.ImportConstructor(member, comp));
+
+				else if (memberType == "property")
+					comp.AddMember(Property.ImportProperty(member, comp));
+			}
+		}
+
+		bool IsClientComponent() { return true; }
+	}
+
+
+	/** Enum */
+	class Enum : Interface
+	{
+		new(string name) : base(name)
+		{
+			_symbolType = SymbolType.Enum;
+		}
+
+		map<int> KVPairs : _kv = {}
+		{
+			get return _kv;
+		}
+
+		/** Serialize */
+		object Serialise()
+		{
+			var kvs = {};
+			foreach (var key in _kv.Keys())
+				kvs[key] = _kv[key];
+
+			return {type: "enum", kvpairs: kvs};
+		}
+
+		/** Serialise type */
+		object SerialiseType()
+		{
+			return {type: "enum", name: FullName};
+		}
+
+
+		/** Import enum */
+		static Enum ImportEnum(string name, object symbol, Namespace parent)
+		{
+			Enum enm = new Enum(name);
+			enm.Namespace = parent;
+			enm._imported = true;
+			var kv = (map)symbol["kvpairs"];
+
+			foreach (var key in kv.Keys())
+				enm.KVPairs[key] = (int)kv[key];
+
+			return enm;
+
+		}
+
+		bool IsEnum() { return true; }
+
+	}
+
+
+	/** Member symbol */
+	class Member : Symbol
+	{
+		new(Interface type, string name) : base(name)
+		{
+			_symbolType = SymbolType.Member;
+			_type = type;
+			_access = MemberAccess.Public;
+		}
+
+		MemberType MemberType : protected _memberType
+		{
+			get return _memberType;
+		}
+
+		Interface Owner : protected _owner
+		{
+			get return _owner;
+			set _owner = value;
+		}
+
+		Interface Type : protected _type
+		{
+			get return _type;
+		}
+
+		MemberAccess Access : protected _access
+		{
+			get return _access;
+			set _access = value;
+		}
+
+		bool Static : protected _static
+		{
+			get return _static;
+			set _static = value;
+		}
+
+		// The interface member being implemented
+		Member Implementing : private _implementing
+		{
+			get return _implementing;
+			set _implementing = value;
+		}
+
+		bool AccessibleFrom(Method method)
+		{
+			var intr = method.Owner;
+			switch (_access)
+			{
+				case MemberAccess.Public:
+					return true;
+
+				case MemberAccess.Private:
+					return intr == _owner;
+
+				case MemberAccess.Protected:
+				{
+					if (intr.GetSymbolType() != SymbolType.Class && intr.GetSymbolType() != SymbolType.Symbol)
+						return false;
+
+					var cls = (Class)intr;
+					return cls.DistanceTo(_owner) >= 0;
+				}
+
+				default:
+					return false;
+
+			}
+		}
+
+
+		virtual bool IsField() { return false; }
+		virtual bool IsMethod() { return false; }
+		virtual bool IsProperty() { return false; }
+		virtual bool IsConstructor() { return false; }
+	}
+
+
+	/** Field symbol */
+	class Field : Member
+	{
+		new(Interface type, string name) : base(type, name)
+		{
+			_memberType = MemberType.Field;
+		}
+
+		ExpressionNode Default : private _defaultValue
+		{
+			get return _defaultValue;
+			set _defaultValue = value;
+		}
+
+		object Serialise()
+		{
+			return {memberType: "field", type: _type ? _type.SerialiseType() : null, name: _name, access: _access, "static": _static};
+		}
+
+		bool IsField() { return true; }
+
+		static Field ImportField(object symbol, Interface from)
+		{
+			var field = new Field(Interface.ImportType(symbol["type"], from), (string)symbol["name"]);
+			field.Access = (MemberAccess)((object)symbol["access"]);
+			field.Static = (bool)symbol["static"];
+
+			return field;
+		}
+	}
+
+
+	/** Method parameter */
+	class MethodParameter
+	{
+		new(Interface type, string name, object defaultValue = null)
+		{
+			Type = type;
+			Name = name;
+			Default = defaultValue;
+		}
+
+		Interface Type;
+		string Name;
+		object Default;
+
+		object Serialise()
+		{
+			var output = {type: Type ? Type.SerialiseType() : null, name: Name, defaultValue: Default};
+
+			return output;
+		}
+	}
+
+
+	/** Method */
+	class Method : Member
+	{
+		new(Interface type, string name) : base(type, name)
+		{
+			_memberType = MemberType.Method;
+			_parameters = [];
+			_minArgsNeeded = 0;
+			_inlinePHP = "";
+			_inlineJS = "";
+			_usings = [];
+		}
+
+		int DefinitionStartLine : protected _defStartLine
+		{
+			get return _defStartLine;
+			set _defStartLine = value;
+		}
+
+		int DefinitionStartColumn : protected _defStartColumn
+		{
+			get return _defStartColumn;
+			set _defStartColumn = value;
+		}
+
+		int DefinitionStartPosition : protected _defStartPosition
+		{
+			get return _defStartPosition;
+			set _defStartPosition = value;
+		}
+
+		int DefinitionEndLine : protected _defEndLine
+		{
+			get return _defEndLine;
+			set _defEndLine = value;
+		}
+
+		int DefinitionEndColumn : protected _defEndColumn
+		{
+			get return _defEndColumn;
+			set _defEndColumn = value;
+		}
+
+		int DefinitionEndPosition : protected _defEndPosition
+		{
+			get return _defEndPosition;
+			set _defEndPosition = value;
+		}
+
+		BlockNode Block : protected _block
+		{
+			get return _block;
+			set
+			{
+				_block = value;
+				_defStartLine = value.StartLine;
+				_defStartColumn = value.StartColumn;
+				_defStartPosition = value.StartPosition;
+				_defEndLine = value.EndLine;
+				_defEndColumn = value.EndColumn;
+				_defEndPosition = value.EndPosition;
+			}
+		}
+
+
+		// If there's other methods with the same name
+		// this number shows which one it is
+		int Overload : protected _overload
+		{
+			get return _overload;
+			set _overload = value;
+		}
+
+		bool Virtual : private _virtual
+		{
+			get return _virtual;
+			set _virtual = value;
+		}
+
+		// Which virtual method we're overriding
+		Method Override : private _override
+		{
+			get return _override;
+			set _override = value;
+		}
+
+		bool DoesOverride(Method method)
+		{
+			if (_override == method)
+				return true;
+
+			if (!_override)
+				return false;
+			else
+				return _override.DoesOverride(method);
+		}
+
+		bool IsPropertyMethod : private _isPropMethod
+		{
+			get return _isPropMethod;
+			set _isPropMethod = value;
+		}
+
+		bool PropertyMethodIsBlock : private _propMethodIsBlock
+		{
+			get return _propMethodIsBlock;
+			set _propMethodIsBlock = value;
+		}
+
+		bool Aliased : private _aliased
+		{
+			get return _aliased;
+			set _aliased = value;
+		}
+
+
+		MethodParameter[] Parameters : protected _parameters
+		{
+			get return _parameters;
+		}
+
+		int MinimumArgsNeeded : private _minArgsNeeded
+		{
+			get return _minArgsNeeded;
+		}
+
+		bool AddParameter(Interface type, string name, object defaultValue = null)
+		{
+			bool found = false;
+			foreach (var param in _parameters)
+				if (param.Name == name)
+				{
+					found = true;
+					break;
+				}
+
+			if (!defaultValue)
+				_minArgsNeeded++;
+
+			_parameters.Add(new MethodParameter(type, name, defaultValue));
+			return !found;
+		}
+
+		Namespace[] Usings : private _usings
+		{
+			get return _usings;
+		}
+
+		void CopyUsingsFromSymbolTable(SymbolTable symbolTable)
+		{
+			foreach (var used in symbolTable.Usings)
+				_usings.Add(used);
+		}
+
+
+		int GetMatch(CallExpressionNode call, Scope scope)
+		{
+			if (_name != call.Name)
+				return -2;
+
+			if (!call.ArgList)
+			{
+				if (_minArgsNeeded == 0)
+					return 0;
+				else
+					return -1;
+			}
+
+			// Check if we have fewer than the minimum number of required arguments
+			if (call.ArgList.Length() < _minArgsNeeded)
+				return -1;
+
+			int diff = 0;
+			for (int p = 0; p < call.ArgList.Length(); p++)
+			{
+				if (p >= _parameters.Length())
+					return -1;
+
+				var arg = call.ArgList[p];
+
+				var pType = _parameters[p].Type;
+
+				if (pType == Interface.ObjectType)
+					diff++;
+				else if (arg.ExprType == ExpressionType.LitArray)
+				{
+					var litArray = (LitArrayExpressionNode)arg;
+					if (!pType.IsArray())
+						return -1;
+
+					var parr = (ArrayType)pType;
+					if (!parr.CastsTo(litArray, scope))
+						return -1;
+
+					diff++;
+				}
+				else if (arg.ExprType == ExpressionType.Map)
+				{
+					var litMap = (LitMapExpressionNode)arg;
+
+					if (pType.IsClass() || pType.IsInline() || pType.IsDefined)
+					{
+						var inlineParamType = (InlineInterface)pType;
+						if (!inlineParamType.CastsTo(litMap, scope))
+							return -1;
+					}
+					else
+					{
+						if (!pType.IsMap())
+							return -1;
+
+						var pmap = (MapType)pType;
+						if (!pmap.CastsTo(litMap, scope))
+							return -1;
+					}
+
+					diff++;
+				}
+				else if (arg.ExprType == ExpressionType.Function)
+				{
+					if (!pType || !pType.IsFunction())
+						return -1;
+
+					var argFunc = (FunctionExpressionNode)arg;
+					var paramFunc = (FunctionType)pType;
+
+					if (!paramFunc.CastsTo(argFunc, scope))
+						return -1;
+
+					diff++;
+				}
+				else
+				{
+					var aType = arg.GetTypeOf(scope);
+
+					if (!pType || !aType)
+						return -1;
+
+					int dist = aType.DistanceTo(pType);
+					if (dist < 0)
+						return -1;
+
+					diff += dist;
+				}
+			}
+
+			return diff;
+		}
+
+
+		string CompiledName()
+		{
+			if (_override)
+				return _override.CompiledName();
+
+			if (_overload == 0)
+				return _name;
+
+			if (Lexer.IsDigit(_name[_name.Length() - 1]))
+				return _name + "_" + _overload;
+
+			return _name + _overload;
+		}
+
+		string Signature()
+		{
+			var signature = _name + "(";
+
+			int count = 0;
+			foreach (var param in _parameters)
+			{
+				if (count > 0) signature += ",";
+				if (param.Type)
+					signature += param.Type.Signature();
+				else
+					signature += "unknown";
+				count++;
+			}
+
+			signature += ")";
+
+			return signature;
+		}
+
+		string DetailName()
+		{
+			var signature = _name + "(";
+
+			int count = 0;
+			foreach (var param in _parameters)
+			{
+				if (count > 0) signature += ", ";
+				if (param.Type)
+					signature += param.Type.DetailName();
+				else
+					signature += "unknown";
+
+				signature += " " + param.Name;
+				count++;
+			}
+
+			signature += ")";
+
+			return signature;
+		}
+
+
+		string GetInsertSnippet()
+		{
+			if (_docs)
+				return _docs.GetMethodInsertSnippet(this);
+
+			var snippet = _name + "(";
+
+			var counter = (map){count: 1};
+			foreach (var param in _parameters)
+			{
+				if (counter.count > 1) snippet += ", ";
+
+				if (param.Type.IsFunction())
+					snippet += ((FunctionType)param.Type).GetInsertSnippet(counter);
+				else
+					snippet += '${' + ("" + (int)counter.count) + ':' + param.Name + '}';
+
+				counter.count = counter.count + 1;
+			}
+
+			snippet += ")";
+
+			if (_type == Interface.VoidType)
+				snippet += ";";
+
+			return snippet;
+		}
+
+
+		object Serialise()
+		{
+			var params = [];
+			foreach (var param in _parameters)
+				if (param)
+					params.Add(param.Serialise());
+				else
+					params.Add(null);
+
+			return {memberType: "method", type: _type ? _type.SerialiseType() : null, params: params, name: _name, access: _access, "static": _static, "virtual": _virtual, overload: _overload};
+		}
+
+		static Method ImportMethod(object symbol, Interface from)
+		{
+			var method = new Method(Interface.ImportType(symbol["type"], from), (string)symbol["name"]);
+			method.Access = (MemberAccess)((object)symbol["access"]);
+			method.Static = (bool)symbol["static"];
+			method.Virtual = (bool)symbol["virtual"];
+
+			var params = (array)symbol["params"];
+			foreach (var param in params)
+				method.AddParameter(Interface.ImportType(param["type"], from), (string)param["name"], param["defaultValue"]);
+
+			return method;
+		}
+
+
+		bool IsMethod() { return true; }
+		virtual bool IsServerRender() { return false; }
+		virtual bool IsTemplateMethod() { return false; }
+
+
+		static Method Create(Interface returnType, string name, map[] params, map code, SymbolDoc doc = null)
+		{
+			var method = new Method(returnType, name);
+
+			foreach (var param in params)
+				method.AddParameter((Interface)param["type"], (string)param["name"]);
+
+			
+			if (code.HasKey("block"))
+			{
+				var parser = new Parser();
+				parser.SetContent((string)code["block"]);
+
+				method.Block = parser.ParseBlock();
+			}
+
+			if (code.HasKey("js"))
+				method._inlineJS = (string)code["js"];
+
+			if (code.HasKey("php"))
+				method._inlinePHP = (string)code["php"];
+
+			if (doc)
+				method.Docs = doc;
+
+			return method;
+		}
+
+		static Method CreateStatic(Interface returnType, string name, map[] params, map code, SymbolDoc doc = null)
+		{
+			var method = Create(returnType, name, params, code, doc);
+			method.Static = true;
+
+			return method;
+		}
+
+		// These for native classes only and tells the compiler how to rename method call and where to put
+		//   'this' and arguments
+		string InlinePHP : private _inlinePHP = ""
+		{
+			get return _inlinePHP;
+		}
+		string InlineJS : private _inlineJS = ""
+		{
+			get return _inlineJS;
+		}
+
+	}
+
+
+	/** Template render method */
+	class TemplateRender : Method
+	{
+		new(string name, Template templ) : base(Interface.ObjectType, name)
+		{
+			_memberType = MemberType.TemplateRender;
+			_parameters = [];
+			_templ = templ;
+		}
+
+		Template Templ : private _templ
+		{
+			get return _templ;
+			set _templ = value;
+		}
+
+		bool IsTemplateMethod() { return true; }
+	}
+
+
+	/** Server render method */
+	class ServerRender : Method
+	{
+		new() : base(Interface.ObjectType, "Render")
+		{
+			_memberType = MemberType.ServerRender;
+			_parameters = [];
+		}
+
+
+		object Serialise()
+		{
+			var params = [];
+			foreach (var param in _parameters)
+				if (param)
+					params.Add(param.Serialise());
+				else
+					params.Add(null);
+
+			return {memberType: "server-render", type: null, params: params, overload: _overload};
+		}
+
+		static ServerRender ImportServerRender(object symbol, Interface from)
+		{
+			var method = new ServerRender();
+
+			var params = (array)symbol["params"];
+			foreach (var param in params)
+				method.AddParameter(Interface.ImportType(param["type"], from), (string)param["name"], param["defaultValue"]);
+
+			return method;
+		}
+
+		bool IsServerRender() { return true; }
+	}
+
+
+	/** Constructor */
+	class Constructor : Method
+	{
+		new() : base(null, "_New")
+		{
+			_memberType = MemberType.Constructor;
+			_parameters = [];
+		}
+
+		CallExpressionNode BaseCall : private _baseCall = null
+		{
+			get return _baseCall;
+			set _baseCall = value;
+		}
+
+
+		string DetailName()
+		{
+			//var signature =  _owner.Name + "(";
+			var signature = "new(";
+
+			int count = 0;
+			foreach (var param in _parameters)
+			{
+				if (count > 0) signature += ", ";
+				if (param.Type)
+					signature += param.Type.DetailName();
+				else
+					signature += "unknown";
+
+				signature += " " + param.Name;
+				count++;
+			}
+
+			signature += ")";
+
+			return signature;
+		}
+
+		string ConstructorDetailName()
+		{
+			var signature =  _owner.Name + "(";
+
+			int count = 0;
+			foreach (var param in _parameters)
+			{
+				if (count > 0) signature += ", ";
+				if (param.Type)
+					signature += param.Type.DetailName();
+				else
+					signature += "unknown";
+
+				signature += " " + param.Name;
+				count++;
+			}
+
+			signature += ")";
+
+			return signature;
+		}
+
+
+		string GetInsertSnippet()
+		{
+			//if (_docs)
+			//	return _docs.GetMethodInsertSnippet(this);
+
+			var snippet = _owner.Name + "(";
+
+			var counter = (map){count: 1};
+			foreach (var param in _parameters)
+			{
+				if (counter.count > 1) snippet += ", ";
+
+				if (param.Type.IsFunction())
+					snippet += ((FunctionType)param.Type).GetInsertSnippet(counter);
+				else
+					snippet += '${' + ("" + (int)counter.count) + ':' + param.Name + '}';
+
+				counter.count = counter.count + 1;
+			}
+
+			return snippet + ")";
+		}
+
+
+		object Serialise()
+		{
+			var params = [];
+			foreach (var param in _parameters)
+				if (param)
+					params.Add(param.Serialise());
+				else
+					params.Add(null);
+
+			return {memberType: "constructor", params: params, name: _name, access: _access, overload: _overload};
+		}
+
+		static Constructor ImportConstructor(object symbol, Interface from)
+		{
+			var constr = new Constructor();
+			constr.Access = (MemberAccess)((object)symbol["access"]);
+
+			var params = (array)symbol["params"];
+			foreach (var param in params)
+				constr.AddParameter(Interface.ImportType(param["type"], from), (string)param["name"]);
+
+			return constr;
+		}
+
+
+		bool IsConstructor() { return true; }
+	}
+
+
+
+	/** Property */
+	class Property : Member
+	{
+		new(Interface type, string name) : base(type, name)
+		{
+			_memberType = MemberType.Property;
+		}
+
+		Method Getter : private _getter
+		{
+			get return _getter;
+			set _setter = value;
+		}
+
+		Method Setter : private _setter
+		{
+			get return _setter;
+			set _setter = value;
+		}
+
+		object Serialise()
+		{
+			return {memberType: "property", type: _type ? _type.SerialiseType() : null, name: _name, access: _access, "static": _static};
+		}
+
+		static Property ImportProperty(object symbol, Interface from)
+		{
+			var property = new Property(Interface.ImportType(symbol["type"], from), (string)symbol["name"]);
+			property.Access = (MemberAccess)((object)symbol["access"]);
+			property.Static = (bool)symbol["static"];
+
+			return property;
+		}
+
+		bool IsProperty() { return true; }
+	}
+
+
+
+	/** Symbol table */
+	class SymbolTable : Namespace
+	{
+		new(string name) : base(name)
+		{
+			_symbolType = SymbolType.SymbolTable;
+
+			// Create built-in native types
+			SetSymbol(Interface.ObjectType.ArrayOf);
+			SetSymbol(Interface.ObjectType.MapOf);
+			SetSymbol(Interface.StringType);
+		}
+
+
+		/** Use multiple namespaces */
+		void UseNamespaces(Namespace[] ns)
+		{
+			foreach (var n in ns)
+				UseNamespace(n);
+		}
+
+		/** Clear usings when a file has been parsed */
+		void ClearUsings()
+		{
+			_usings = [];
+		}
+
+
+		/** Serialize */
+		object Serialise()
+		{
+			var symbols = {};
+			foreach (var symbol in this.SymbolArray)
+				//if (!symbol.Imported)		// Comment this back in if everything breaks
+				{
+
+					// Ugly but simple
+					if (symbol.IsNamespace())
+					{
+						if (((Namespace)symbol).IsInterface())
+						{
+							if (((Interface)symbol).IsClass())
+							{
+								if (!((Class)symbol).IsNative)
+									symbols[symbol.Name] = symbol.Serialise();
+							}
+							else
+								symbols[symbol.Name] = symbol.Serialise();
+						}
+						else
+							symbols[symbol.Name] = symbol.Serialise();
+					}
+					else
+						symbols[symbol.Name] = symbol.Serialise();
+				}
+
+			return {type: "package", symbols: symbols};
+		}
+
+		/** Import symbol table (deprecated) */
+		static SymbolTable Import(string name, object symbol, SymbolTable sharedImport = null)
+		{
+			var symbolTable = eco.Namespace.ImportSkeleton(name, symbol, null, sharedImport);
+
+			eco.Namespace.ImportFull(name, symbolTable, symbol);
+
+			return (SymbolTable)symbolTable;
+		}
+
+		static SymbolTable Import(string name, SymbolTable into, object symbol, SymbolTable sharedImport = null)
+		{	
+			var symbolTable = eco.Namespace.ImportSkeleton(name, symbol, null, sharedImport);
+			symbolTable.Name += "-import";
+
+			eco.Namespace.ImportFull(name, symbolTable, symbol);
+
+			foreach (var symbol in symbolTable.SymbolArray)
+				into.SetSymbol(symbol, true);
+
+			return (SymbolTable)symbolTable;
+		}
+
+
+		bool IsSymbolTable() { return true; }
+
+
+	}
+
+}
+
+
+
+

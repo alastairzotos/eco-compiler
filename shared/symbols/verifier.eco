@@ -1,0 +1,1710 @@
+/*
+ * eco library (client)
+ *
+ * verifier.eco
+ */
+
+using std;
+
+
+namespace eco
+{
+
+	/** Verification item */ 
+	class VerificationItem
+	{
+		new(string fileId, string fileName, Method method, SymbolTable symbolTable, Namespace[] usings)
+		{
+			FileID = fileId;
+			FileName = fileName;
+			Method = method;
+			Usings = usings;
+			SymbolTable = symbolTable;
+		}
+
+		string FileID;
+		string FileName;
+		Method Method;
+		SymbolTable SymbolTable;
+		Namespace[] Usings;
+	}
+
+
+	/** Verifier */
+	class Verifier
+	{
+		new(SemanticAnalyser semanticAnalyser)
+		{
+			_semanticAnalyser = semanticAnalyser;
+			//_methods = [];
+			_verItems = [];
+		}
+
+
+		/*Method[] Methods : private _methods
+		{
+			get return _methods;
+		}*/
+		VerificationItem[] VerificationItems : private _verItems
+		{
+			get return _verItems;
+		}
+
+		/*void AddMethod(Method method)
+		{
+			_methods.Add(method);
+		}*/
+
+		void AddItem(string fileId, string fileName, Method method, SymbolTable symbolTable)
+		{
+			_verItems.Add(new VerificationItem(fileId, fileName, method, symbolTable, symbolTable.Usings));
+		}
+
+		void Reset(string fileId)
+		{
+			_curFileId = fileId;
+			//_methods = [];
+			_verItems = [];
+
+			_loopDepth = 0;
+			_switchDepth = 0;
+
+		}
+
+		void VerifyAll()
+		{
+			//foreach (var method in _methods)
+			//	VerifyMethod(method);
+
+			foreach (var item in _verItems)
+				VerifyItem(item);
+		}
+
+
+		void ResetAndVerifyMethod(string fileId, string fileName, SymbolTable symbolTable, Method method)
+		{
+			Reset(fileId); //, symbolTable);
+			//VerifyMethod(method);
+			VerifyItem(new VerificationItem(fileId, fileName, method, symbolTable, symbolTable.Usings));
+		}
+
+		//void VerifyMethod(Method method)
+		void VerifyItem(VerificationItem item)
+		{
+			_curFileId = item.FileID;
+			_semanticAnalyser.FileName = item.FileName;
+
+			var method = item.Method;
+			_symbolTable = item.SymbolTable;
+			_symbolTable.ClearUsings();
+			_semanticAnalyser.CurrentSymbolTable = _symbolTable;
+			_symbolTable.UseNamespaces(item.Usings);
+
+			var cls = (Class)method.Owner;
+
+			// Check if it implements an interface method
+			foreach (var intr in cls.Interfaces)
+			{
+				var found = intr.GetMethodBySignature(method.Signature());
+				if (found)
+					method.Implementing = found;
+			}
+
+
+			var block = method.Block;
+			_scope = new Scope(method);
+
+			if (method.IsServerRender())
+			{
+				var htmlElement = (Class)method.Owner.GetNamespaceBySignature("std").GetNamespaceBySignature("html").GetNamespaceBySignature("HTMLElement");
+				_scope.AddItem(Interface.ObjectType.MapOf, "attr");
+				_scope.AddItem(htmlElement, "children");
+			}
+			else if (method.IsTemplateMethod())
+			{
+				var templ = (Template)method.Owner;
+				var params = templ.Parameters;
+
+				foreach (var p in params)
+					_scope.AddItem(p.Type, p.Name);
+
+			}
+
+
+			foreach (var statement in block.Statements)
+			{
+				try
+				{
+					VerifyStatement(statement);
+				}
+				catch (object e)
+				{
+					:console.error(e);
+				}
+			}
+
+			//_symbolTable.ClearUsings();
+		}
+
+
+	private:
+		SymbolTable _symbolTable;
+		Scope _scope;
+		SemanticAnalyser _semanticAnalyser;
+
+		string _curFileId;
+
+		int _loopDepth;
+		int _switchDepth;
+
+
+
+
+		// --------------------------------------------------------
+		// Statements
+		// --------------------------------------------------------
+
+		void VerifyStatement(StatementNode stmt)
+		{
+			switch (stmt.StmtType)
+			{
+				case StatementType.None:			break;
+
+				case StatementType.Block:			VerifyBlock((BlockNode)stmt);			break;
+				case StatementType.VarDecl:			VerifyVarDecl((VarDeclNode)stmt);		break;
+
+				case StatementType.If:				VerifyIf((IfNode)stmt);					break;
+				case StatementType.For:				VerifyFor((ForNode)stmt);				break;
+				case StatementType.Foreach:			VerifyForeach((ForeachNode)stmt);		break;
+				case StatementType.While:			VerifyWhile((WhileNode)stmt);			break;
+				case StatementType.Switch:			VerifySwitch((SwitchCaseNode)stmt);		break;
+				case StatementType.TryCatch:		VerifyTryCatch((TryCatchNode)stmt);		break;
+				case StatementType.Throw:			VerifyThrow((ThrowNode)stmt);			break;
+				case StatementType.Target:			VerifyTarget((TargetNode)stmt);			break;
+				case StatementType.Await:			VerifyAwait((AwaitNode)stmt);			break;
+
+				case StatementType.Return:			VerifyReturn((ReturnNode)stmt);			break;
+				case StatementType.Break:			VerifyBreak((BreakNode)stmt);			break;
+				case StatementType.Continue:		VerifyContinue((ContinueNode)stmt);		break;
+				case StatementType.Assembly:		VerifyAssembly((AssemblyNode)stmt);		break;
+
+				case StatementType.Expression:		VerifyExpression((ExpressionNode)stmt);	break;
+			}
+		}
+
+		void VerifyBlock(BlockNode node)
+		{
+			AddScope();
+
+			foreach (var statement in node.Statements)
+				VerifyStatement(statement);
+
+			PopScope();
+		}
+
+		void VerifyVarDecl(VarDeclNode node)
+		{
+			if (node.VarType == TypeNode.VarType)
+			{
+				VerifyExpression(node.Expr);
+
+				var type = node.Expr.GetTypeOf(_scope);
+				if (!_scope.AddItem(type, node.Name))
+					Error("Local '${node.Name}' already exists in scope", node);
+			}
+			else
+			{
+				var varType = _scope.OwnerMethod.Owner.GetType(node.VarType);
+				if (!varType)
+					Error("Unrecognised type '" + node.VarType.Name +  "'", node.VarType);
+
+				else if (!_scope.AddItem(varType, node.Name))
+					Error("Local '${node.Name}' already exists in scope", node);
+
+				if (node.Expr)
+				{
+					var expr = node.Expr;
+					VerifyExpression(expr);
+
+					var exprType = expr.GetTypeOf(_scope);
+
+					// Either it's not a variable or we're trying to call a function
+					if (!exprType)
+					{
+						var call = (CallExpressionNode)expr;
+
+						var localFunction = _scope.GetItem(call.Name);
+						if (localFunction)
+						{
+							var funcType = (FunctionType)localFunction.ItemType;
+							var returnType = funcType.ReturnType;
+
+							if (varType && returnType)
+							{
+								if (returnType.DistanceTo(varType) < 0)
+									Error("Cannot cast from '${returnType.Name}' to '${varType.Name}'", node);
+							}
+						}
+					}
+
+					else if (expr.ExprType == ExpressionType.LitArray)
+					{
+						if (varType)
+						{
+							if (!varType.IsArray() && varType != Interface.ObjectType)
+								Error("Cannot cast from '${exprType.Name}' to '${varType.Name}'", node);
+							else
+							{
+								if (varType != Interface.ObjectType)
+								{
+									var arrType = (ArrayType)varType;
+									if (!arrType.CastsTo((LitArrayExpressionNode)expr, _scope))
+										Error("Cannot cast from '${exprType.Name}' to '${varType.Name}'", node);
+								}
+							}
+						}
+					}
+
+					else if (expr.ExprType == ExpressionType.Map)
+					{
+						if (varType)
+						{
+							if (!varType.IsMap() && varType != Interface.ObjectType && !varType.IsInline() && !varType.IsDefined && !varType.IsClass())
+								Error("Cannot cast from '${exprType.Name}' to '${varType.Name}'", node);
+							else
+							{
+								if (varType != Interface.ObjectType)
+								{
+									if (varType.IsClass() || varType.IsInline() || varType.IsDefined)
+									{
+										//var inlineType = (InlineInterface)varType;
+										if (!varType.CastsTo((LitMapExpressionNode)expr, _scope))
+											Error("Cannot cast from '${exprType.Name}' to '${varType.Name}'", node);
+									}
+									else
+									{
+										var mapType = (MapType)varType;
+										if (!mapType.CastsTo((LitMapExpressionNode)expr, _scope))
+											Error("Cannot cast from '${exprType.Name}' to '${varType.Name}'", node);
+									}
+								}
+							}
+						}
+					}
+
+					else if (expr.ExprType == ExpressionType.Function)
+					{
+						if (varType)
+						{
+							if (!varType.IsFunction() && varType != Interface.ObjectType)
+								Error("Cannot cast from '${exprType.Name}' to '${varType.Name}'", node);
+							else
+							{
+								var funcType = (FunctionType)varType;
+								var funcNode = (FunctionExpressionNode)expr;
+								var rightFuncType = funcNode.GetTypeOf(_scope);
+
+								if (rightFuncType.DistanceTo(funcType) < 0)
+									Error("Cannot cast from '${rightFuncType.Name}' to '${funcType.Name}'", node);
+							}
+						}
+					}
+
+					else
+					{
+						if (exprType && varType)
+							if (exprType.DistanceTo(varType) < 0)
+								Error("Cannot cast from '${exprType.Name}' to '${varType.Name}'", node);
+					}
+				}
+			}
+		}
+
+		void VerifyIf(IfNode node)
+		{
+			VerifyExpression(node.Condition);
+
+			var condType = node.Condition.GetTypeOf(_scope);
+			if (!condType)
+				Error("Illegal condition", node.Condition);
+			else if (condType == Interface.VoidType)
+				Error("Condition cannot be void", node.Condition);
+
+			VerifyStatement(node.Then);
+
+			if (node.Else)
+				VerifyStatement(node.Else);
+		}
+
+		void VerifyFor(ForNode node)
+		{
+			_loopDepth++;
+
+			AddScope();
+
+			VerifyStatement(node.Init);
+			VerifyExpression(node.Condition);
+
+			var condType = node.Condition.GetTypeOf(_scope);
+			if (!condType)
+				Error("Illegal condition", node.Condition);
+			else if (condType == Interface.VoidType)
+				Error("Condition cannot be void", node.Condition);
+
+			VerifyExpression(node.Update);
+
+			VerifyStatement(node.Statement);
+
+			PopScope();
+
+			_loopDepth--;	
+		}
+
+		void VerifyForeach(ForeachNode node)
+		{
+			_loopDepth++;
+
+			AddScope();
+
+			var collection = node.Collection;
+			var itrTypeNode1 = node.IteratorType;
+			var itrName1 = node.IteratorName;
+			var itrTypeNode2 = node.IteratorType2;
+			var itrName2 = node.IteratorName2;
+
+
+			VerifyExpression(collection);
+
+
+			// Get type of first iterator
+			var itrIsVar = itrTypeNode1 == TypeNode.VarType;
+			Interface itrType1 = null;
+			if (!itrIsVar)
+			{
+				itrType1 = _scope.OwnerMethod.Owner.GetType(itrTypeNode1);
+				if (!itrType1)
+					Error("Invalid 'foreach' iterator type", itrTypeNode1);
+			}
+
+
+			var collectionType = collection.GetTypeOf(_scope);
+			if (!collectionType)
+				Error("Illegal 'foreach' collection", node.Collection);
+			else
+			{
+				if (!collectionType.IsArray() && !collectionType.IsMap() && collectionType != Interface.StringType && collectionType != Interface.ObjectType)
+					Error("'foreach' collection is not enumerable", node.Collection);
+
+				if (collectionType.IsArray())
+				{
+					var arrayType = (ArrayType)collectionType;
+					var elemType = arrayType.Elem;
+
+					if (itrIsVar)
+						itrType1 = arrayType.Elem;
+					else if (elemType.DistanceTo(itrType1) < 0)
+						Error("Cannot cast from '${elemType.Name}' to '${itrType1.Name}'", node);
+
+					_scope.AddItem(itrType1, itrName1);
+
+
+					// Can't have second iterator
+					if (itrTypeNode2)
+						Error("Array collection only takes one iterator", node);
+				}
+				else if (collectionType.IsMap())
+				{
+					// First iterator must be string
+					if (!itrIsVar)
+					{
+						if (itrType1 != Interface.StringType)
+							Error("Map collection requires first iterator to be string", node);
+					}
+					else
+						itrType1 = Interface.StringType;
+
+					_scope.AddItem(itrIsVar ? Interface.StringType : itrType1, itrName1);
+
+
+					// Must have second iterator
+					if (!itrTypeNode2)
+						Error("Map collection takes two iterators", node);
+					else
+					{
+						var mapType = (MapType)collectionType;
+						var elemType = mapType.Elem;
+
+						var itrIsVar2 = itrTypeNode2 == TypeNode.VarType;
+						Interface itrType2 = null;
+						if (!itrIsVar2)
+						{
+							itrType2 = _scope.OwnerMethod.Owner.GetType(itrTypeNode2);
+							if (!itrType2)
+								Error("Invalid 'foreach' iterator type", node);
+						}
+						else
+							itrType2 = mapType.Elem;
+
+						if (!itrIsVar2 && elemType.DistanceTo(itrType2) < 0)
+							Error("Cannot cast from '${elemType.Name}' to '${itrType2.Name}'", node);
+
+						_scope.AddItem(itrType2, itrName2);
+					}
+				}
+				else if (collectionType == Interface.StringType)
+				{
+					if (itrIsVar)
+						itrType1 = Interface.CharType;
+					else if (itrType1 != Interface.CharType)
+						Error("Cannot cast from 'char' to '${itrType1.Name}'", node);
+
+					_scope.AddItem(Interface.CharType, itrName1);
+
+					// Can't have second iterator
+					if (itrTypeNode2)
+						Error("String collection only takes one iterator", node);
+				}
+				else if (collectionType == Interface.ObjectType)
+				{
+					_scope.AddItem(Interface.ObjectType, itrName1);
+				}
+			}
+
+
+			VerifyStatement(node.Statement);
+
+
+			PopScope();
+
+			_loopDepth--;
+		}
+
+		void VerifyWhile(WhileNode node)
+		{
+			_loopDepth++;
+
+			VerifyExpression(node.Condition);
+			var condType = node.Condition.GetTypeOf(_scope);
+			if (!condType)
+				Error("Illegal condition", node.Condition);
+			else if (condType == Interface.VoidType)
+				Error("Condition cannot be void", node.Condition);
+
+			VerifyStatement(node.Statement);
+
+			_loopDepth--;
+		}
+
+		void VerifySwitch(SwitchCaseNode node)
+		{
+			_switchDepth++;
+
+			VerifyExpression(node.Value);
+
+			foreach (var cas in node.Cases)
+			{
+				VerifyExpression(cas.Value);
+
+				foreach (var caseStmt in cas.Statements)
+					VerifyStatement(caseStmt);
+			}
+
+			if (node.DefaultCase)
+			{
+				foreach (var defStmt in node.DefaultCase.Statements)
+					VerifyStatement(defStmt);
+			}
+
+
+			_switchDepth--;
+		}
+
+
+		void VerifyTryCatch(TryCatchNode node)
+		{
+			VerifyStatement(node.TryBlock);
+
+			AddScope();
+
+			var catchType = _scope.OwnerMethod.Owner.GetType(node.CatchType);
+			if (!catchType)
+				Error("Illegal catch type '${node.CatchType.Name}'", node.CatchType);
+			else
+				_scope.AddItem(catchType, node.CatchName);
+
+			VerifyBlock(node.CatchBlock);
+
+			PopScope();
+		}
+
+		void VerifyThrow(ThrowNode node)
+		{
+			VerifyExpression(node.Expression);
+		}
+
+		void VerifyTarget(TargetNode node)
+		{
+
+		}
+
+		void VerifyAwait(AwaitNode node)
+		{
+			if (_semanticAnalyser.CurrentSymbolTable != _semanticAnalyser.ClientSymbolTable)
+				Error("Cannot use 'await' on server and shared files", node);
+
+			var responderTypeNode = node.Responder.Parent;
+			var responderName = node.Responder.Name;
+
+			var callSig = "";
+
+			var responderType = _semanticAnalyser.ServerSymbolTable.GetType(responderTypeNode);
+			if (!responderType)
+				Error("Cannot find server-side class '${responderTypeNode.FullName}'", responderTypeNode);
+			else
+			{
+				var callNode = new CallExpressionNode(responderName);
+				foreach (var arg in node.ArgList)
+					callNode.ArgList.Add(arg);
+
+				var callSig = callNode.Signature(_scope);
+
+				var responderMethod = responderType.GetMethod(callNode, _scope, function(Method[] dilemmas) {
+						var ambi = "";
+						int count = 0;
+						foreach (var method in dilemmas)
+						{
+							if (count > 0) ambi += ", ";
+							ambi += method.Signature();
+							count++;
+						}
+
+						Error("Ambiguous await method call. Could be " + ambi, node.Responder);
+					});
+
+				if (!responderMethod)
+					//Error("Cannot find server-side method '${responderName}(${argStr})'", node.Responder);
+					Error("Cannot find server-side method '${callSig}' in class '${responderTypeNode.FullName}'", node.Responder);
+				else if (!responderMethod.Static)
+					Error("Server-side method '${responderName}()' must be static", node.Responder);
+			}
+
+
+			foreach (var arg in node.ArgList)
+				VerifyExpression(arg);
+
+			var resultType = _scope.OwnerMethod.Owner.GetType(node.ResultType);
+			if (!resultType)
+				Error("Unknown type '${node.ResultType.FullName}'", node.ResultType);
+
+			var resultName = node.ResultVarName;
+
+
+			AddScope();
+
+			_scope.AddItem(resultType, resultName);
+
+			if (node.StatusVarName != "")
+				_scope.AddItem(Interface.IntType, node.StatusVarName);
+			else
+				_scope.AddItem(Interface.IntType, "status");
+
+			VerifyBlock(node.Block);
+
+			PopScope();
+		}
+
+		void VerifyReturn(ReturnNode node)
+		{
+			if (node.ReturnValue)
+			{
+				VerifyExpression(node.ReturnValue);
+
+				if (_scope.OwnerMethod.Type == Interface.ObjectType)
+					return;
+
+				if (node.ReturnValue.ExprType == ExpressionType.LitArray)
+				{
+					var t1 = _scope.OwnerMethod.Type;
+
+					if (t1)
+					{
+						if (!t1.IsArray())
+							Error("Cannot cast from '" + node.ReturnValue.GetTypeOf(_scope).Name + "' to '${t1.Name}'", node);
+						else
+						{
+							var arrType = (ArrayType)t1;
+							if (!arrType.CastsTo((LitArrayExpressionNode)node.ReturnValue, _scope))
+								Error("Cannot cast from '" + node.ReturnValue.GetTypeOf(_scope).Name + "' to '${t1.Name}'", node);
+
+						}
+					}
+				}
+				else if (node.ReturnValue.ExprType == ExpressionType.Map)
+				{
+					var t1 = _scope.OwnerMethod.Type;
+
+					if (t1)
+					{
+						if (!t1.IsMap())
+						{
+							if (t1.IsClass() || t1.IsInline() || t1.IsDefined)
+							{
+								if (!t1.CastsTo( (LitMapExpressionNode)node.ReturnValue, _scope))
+									Error("Cannot cast from '" + node.ReturnValue.GetTypeOf(_scope).Name + "' to '${t1.Name}'", node);
+							}
+							else
+								Error("Cannot cast from '" + node.ReturnValue.GetTypeOf(_scope).Name + "' to '${t1.Name}'", node);
+						}
+						else
+						{
+							var mapType = (MapType)t1;
+							if (!mapType.CastsTo((LitMapExpressionNode)node.ReturnValue, _scope))
+								Error("Cannot cast from '" + node.ReturnValue.GetTypeOf(_scope).Name + "' to '${t1.Name}'", node);
+
+						}
+					}
+				}
+				else
+				{
+					var retType = node.ReturnValue.GetTypeOf(_scope);
+					if (!retType)
+					{
+						// Try get type
+						if (node.ReturnValue.ExprType == ExpressionType.MethodCall)
+						{
+							var call = (MethodCallExpressionNode)node.ReturnValue;
+
+							retType = call.Expr.TryGetType(_scope);
+							if (retType)
+							{
+								var found = (Method)retType.GetMethod(call.Call, _scope, null);
+								if (found)
+									retType = found.Type;
+							}
+						}
+
+						if (!retType)
+							Error("Illegal return type", node);
+					}
+					else if (retType.DistanceTo(_scope.OwnerMethod.Type) < 0)
+						Error("Method '" + _scope.OwnerMethod.Signature() + "' cannot return value of type '${retType.Name}'", node);
+				}
+			}
+			else if (_scope.OwnerMethod.Type && _scope.OwnerMethod.Type != Interface.VoidType)
+				Error("'" + _scope.OwnerMethod.Signature() + "' must return a value", node);
+		}
+
+		void VerifyBreak(BreakNode node)
+		{
+			if (_loopDepth <= 0 && _switchDepth <= 0)
+				Error("Illegal 'break' statement outside loop or switch case", node);
+		}
+
+		void VerifyContinue(ContinueNode node)
+		{
+			if (_loopDepth <= 0)
+				Error("Illegal 'continue' statement outside loop", node);
+		}
+
+		void VerifyAssembly(AssemblyNode node)
+		{
+		}
+		
+
+
+		// --------------------------------------------------------
+		// Expressions
+		// --------------------------------------------------------
+
+
+		void VerifyExpression(ExpressionNode node)
+		{
+			switch (node.ExprType)
+			{
+				case ExpressionType.None:			break;
+
+				case ExpressionType.Lit:			VerifyLit((LitExpressionNode)node);					break;
+				case ExpressionType.Load:			VerifyLoad((LoadExpressionNode)node);				break;
+				case ExpressionType.Access:			VerifyAccess((AccessExpressionNode)node);			break;
+				case ExpressionType.ArrayAccess:	VerifyArrayAccess((ArrayAccessExpressionNode)node);	break;
+				case ExpressionType.LitArray:		VerifyLitArray((LitArrayExpressionNode)node);		break;
+				case ExpressionType.Map:			VerifyLitMap((LitMapExpressionNode)node);			break;
+				case ExpressionType.Function:		VerifyFunction((FunctionExpressionNode)node);		break;
+				case ExpressionType.Op:				VerifyOp((OperatorExpressionNode)node);				break;
+				case ExpressionType.PreOp:			VerifyPreOp((PreOpExpressionNode)node);				break;
+				case ExpressionType.PostOp:			VerifyPostOp((PostOpExpressionNode)node);			break;
+				case ExpressionType.CondOp:			VerifyCondOp((CondOpExpressionNode)node);			break;
+				case ExpressionType.Par:			VerifyPar((ParExpressionNode)node);					break;
+				case ExpressionType.New:			VerifyNew((NewExpressionNode)node);					break;
+				case ExpressionType.Call:			VerifyCall((CallExpressionNode)node);				break;
+				case ExpressionType.ComplexCall:	VerifyComplexCall((ComplexCallExpressionNode)node);	break;
+				case ExpressionType.BaseCall:		VerifyBaseCall((BaseCallExpressionNode)node);		break;
+				case ExpressionType.MethodCall:		VerifyMethodCall((MethodCallExpressionNode)node);	break;
+				case ExpressionType.Typecast:		VerifyTypecast((TypecastExpressionNode)node);		break;
+				case ExpressionType.Assembly:		VerifyAssemblyExpr((AssemblyExpressionNode)node);	break;
+
+				case ExpressionType.HTML:			VerifyHTML((HTMLExpressionNode)node);				break;
+				case ExpressionType.HTMLText:		VerifyHTMLText((HTMLTextExpressionNode)node);		break;
+				case ExpressionType.HTMLCode:		VerifyHTMLCode((HTMLCodeExpressionNode)node);		break;
+			}
+		}
+
+
+		void VerifyLValue(ExpressionNode node)
+		{
+			switch (node.ExprType)
+			{
+				case ExpressionType.Load:			VerifyLoad((LoadExpressionNode)node);						break;
+				case ExpressionType.Access:			VerifyAccess((AccessExpressionNode)node, true);				break;
+				case ExpressionType.ArrayAccess:	VerifyArrayAccess((ArrayAccessExpressionNode)node, true);	break;
+
+				default:
+					Error("Illegal l-value", node);
+			}
+		}
+
+		void VerifyLit(LitExpressionNode node)
+		{
+		}
+
+		void VerifyLoad(LoadExpressionNode node)
+		{
+			if (_scope.OwnerMethod.Static && node.VarName == "this" && !node.IsNative)
+				Error("Cannot access 'this' from static method", node);
+
+			var etype = node.GetTypeOf(_scope);
+			if (!etype || etype == Interface.NullType)
+				Error("Cannot find identifier '${node.VarName}'", node);
+			else if (!node.IsNative)
+			{
+				var item = _scope.GetItem(node.VarName);
+				if (!item)
+				{
+					var member = _scope.OwnerMethod.Owner.GetMember(node.VarName);
+					if (_scope.OwnerMethod.Static && !member.Static)
+						Error("Cannot access non-static member '${node.VarName}' from static method '" + _scope.OwnerMethod.Signature() + "'", node);
+
+					if (member.MemberType == MemberType.Field)
+					{
+						var field = (Field)member;
+
+						if (field && !field.AccessibleFrom(_scope.OwnerMethod))
+							Error("'" + field.Owner.Name + "." + field.Name + "' is not accessible from '" + _scope.OwnerMethod.Signature() + "'", node);
+					}
+				}
+			}
+		}
+
+		void VerifyAccess(AccessExpressionNode node, bool lValue = false)
+		{
+			bool staticAccess = false;
+			var intr = node.Expression.GetTypeOf(_scope);
+
+			if (!intr || intr == Interface.NullType)
+			{
+				intr = node.Expression.TryGetType(_scope);
+				staticAccess = true;
+			}
+			else
+			{
+				VerifyExpression(node.Expression);
+
+				if (intr == Interface.ObjectType || intr.IsMap())
+					return;
+
+				var exprType = node.GetTypeOf(_scope);
+				if (!exprType)
+					Error("Cannot find identifier '${node.Field}' in type '${intr.Name}'", node);
+			}
+
+
+			if (intr)
+			{
+				if (intr.GetSymbolType() == SymbolType.Enum)
+				{
+					var kvpairs = ((Enum)intr).KVPairs;
+
+					if (!kvpairs.HasKey(node.Field))
+						Error("Cannot find identifier '${node.Field}' in enum '${intr.Name}'", node);
+					else if (lValue)
+						Error("Cannot assign value to '${intr.Name}.${node.Field}'", node);
+				}
+				else
+				{
+					if (intr.GetSymbolType() == SymbolType.Interface)
+					{
+						if (intr.IsInline() || intr.IsDefined)
+						{
+							var inlineMember = intr.GetMember(node.Field);
+							if (!inlineMember)
+								Error("Cannot find identifier '${node.Field}' in type '${intr.Name}'", node);
+
+							else if (!inlineMember.IsField())
+								Error("Cannot access method '${node.Field}' as field from type '${intr.Name}'", node);
+						}
+						else
+							Error("Cannot access field '${node.Field}' from non-class type '${intr.Name}'", node);
+					}
+
+					var member = intr.GetMember(node.Field);
+					if (!member)
+						Error("Cannot find identifier '${node.Field}' in class '${intr.Name}'", node);
+
+					else
+					{
+						if (!member.AccessibleFrom(_scope.OwnerMethod))
+							Error("'" + intr.Name + "." + member.Name + "' is not accessible from '" + _scope.OwnerMethod.Signature() + "'", node);
+
+						if (staticAccess && !member.Static)
+							Error("Member '" + member.Owner.Name + "." + member.Name + "' is not static", node);
+
+						if (member.Static && !staticAccess)
+							Error("Cannot access static field '" + member.Owner.Name + "." + member.Name + "' from an object", node);
+
+						if (member.MemberType == MemberType.Property)
+						{
+							var prop = (Property)member;
+
+							/*if (lValue)
+							{
+								if (!prop.Setter)
+									Error("Property '${prop.Name}' has no setter method", node);
+							}
+							else if (!prop.Getter)
+							{
+								Error("Property '${prop.Name}' has no getter method", node);
+							}*/
+						}
+					}
+				}
+			}
+			else
+				Error("Invalid expression", node.Expression);
+		}
+
+		void VerifyArrayAccess(ArrayAccessExpressionNode node, bool lValue = false)
+		{
+			VerifyExpression(node.Expr);
+
+			var exprType = node.Expr.GetTypeOf(_scope);
+			if (!exprType ||
+				(exprType == Interface.NullType) ||
+				(!exprType.IsArray() && (exprType != Interface.StringType) && !exprType.IsMap() && exprType != Interface.ObjectType)
+				)
+				Error("Cannot index non-array, map or string value", node.Expr);
+
+			VerifyExpression(node.Index);
+			var indexType = node.Index.GetTypeOf(_scope);
+			if (!indexType)
+				Error("Illegal index type", node.Index);
+
+			else if (indexType != Interface.IntType && indexType != Interface.StringType && indexType != Interface.CharType)
+				Error("Cannot access value using '${indexType.Name}' as an index", node.Index);
+		}
+
+		void VerifyLitArray(LitArrayExpressionNode node)
+		{
+			foreach (var item in node.Items)
+				VerifyExpression(item);
+		}
+
+		void VerifyLitMap(LitMapExpressionNode node)
+		{
+			foreach (var key in node.Items.Keys())
+				VerifyExpression(node.Items[key]);
+		}
+
+		void VerifyFunction(FunctionExpressionNode node)
+		{
+			var returnType = Interface.ObjectType;
+			if (node.ReturnType)
+				returnType = _scope.OwnerMethod.Owner.GetType(node.ReturnType);
+
+			var func = new Method(returnType, "<anonymous>");
+			func.Owner = _scope.OwnerMethod.Owner;
+
+			AddScope(func);
+
+			foreach (var param in node.Params)
+			{
+				var name = (string)param.name;
+				var type = _scope.OwnerMethod.Owner.GetType( (TypeNode)param.type );
+				var typeName = ((TypeNode)param.type).Name;
+
+				if (!type)
+					Error("Unknown parameter type '${typeName}' for '${name}'", (TypeNode)param.type);
+
+				func.AddParameter(type, name);
+				_scope.AddItem(type, name);
+			}
+
+			VerifyBlock(node.Block);
+
+			PopScope();
+
+		}
+
+		void VerifyOp(OperatorExpressionNode node)
+		{
+			switch (node.Operator)
+			{
+				case OpType.Assign:
+				case OpType.AAdd:
+				case OpType.ASub:
+				case OpType.AMul:
+				case OpType.ADiv:
+				case OpType.AExp:
+				case OpType.AMod:
+				{
+					VerifyLValue(node.Expression1);
+					VerifyExpression(node.Expression2);
+
+					var t1 = node.Expression1.GetTypeOf(_scope);
+					var t2 = node.Expression2.GetTypeOf(_scope);
+
+					if (t1 && t2 && t1 != Interface.NullType && t2 != Interface.NullType)
+					{
+						if (node.Expression2.ExprType == ExpressionType.LitArray)
+						{
+							if (!t1.IsArray() && t1 != Interface.ObjectType)
+								Error("Cannot cast from '${t1.Name}' to '${t2.Name}'", node);
+							else
+							{
+								if (t1 != Interface.ObjectType)
+								{
+									var arrType = (ArrayType)t1;
+									if (!arrType.CastsTo((LitArrayExpressionNode)node.Expression2, _scope))
+										Error("Cannot cast from '${t2.Name}' to '${t1.Name}'", node);
+								}
+							}
+
+						}
+						else if (node.Expression2.ExprType == ExpressionType.Map)
+						{
+							if (!t1.IsMap() && t1 != Interface.ObjectType && !t1.IsInline() && !t1.IsDefined && !t1.IsClass())
+								Error("Cannot cast from '${t2.Name}' to '${t1.Name}'", node);
+							else
+							{
+								if (t1 != Interface.ObjectType)
+								{
+									if (t1.IsClass() || t1.IsInline() || t1.IsDefined)
+									{
+										if (!t1.CastsTo((LitMapExpressionNode)node.Expression2, _scope))
+											Error("Cannot cast from '${t2.Name}' to '${t1.Name}'", node);
+									}
+									else
+									{
+										var mapType = (MapType)t1;
+										if (!mapType.CastsTo((LitMapExpressionNode)node.Expression2, _scope))
+											Error("Cannot cast from '${t2.Name}' to '${t1.Name}'", node);
+									}
+								}
+							}
+						}
+						else if (node.Expression2.ExprType == ExpressionType.Function)
+						{
+							if (!t1.IsFunction() && t1 != Interface.ObjectType)
+								Error("Cannot cast from '${t2.Name}' to '${t1.Name}'", node);
+							else if (t1 != Interface.ObjectType)
+							{
+								var funcType = (FunctionType)t1;
+								var funcNode = (FunctionExpressionNode)node.Expression2;
+								var rightFuncType = funcNode.GetTypeOf(_scope);
+
+								if (!funcType.CastsTo(funcNode, _scope))
+									Error("Cannot cast from '${rightFuncType.Name}' to '${funcType.Name}'", node);
+							}
+						}
+						else
+						{
+							if (t2.DistanceTo(t1) < 0)
+								Error("Cannot cast from '${t2.Name}' to '${t1.Name}'", node);
+						}
+					}
+
+					break;
+				}
+
+
+				default:
+				{
+					VerifyExpression(node.Expression1);
+					VerifyExpression(node.Expression2);
+
+					var exprType = node.GetTypeOf(_scope);
+
+					if (!exprType || exprType == Interface.NullType)
+						Error("Illegal operand types for '" + TokenOp.GetOpName(node.Operator) + "'", node);
+
+					break;
+				}
+			}
+		}
+
+
+		void VerifyPreOp(PreOpExpressionNode node)
+		{
+			var exprType = node.Expression.GetTypeOf(_scope);
+
+			if (node.Operator == OpType.Not)
+			{
+				VerifyExpression(node.Expression);
+				//if (exprType != Interface.BoolType)
+				//	Error("Operator '!' expects bool type", node);
+			}
+			else if (node.Operator == OpType.Sub)
+			{
+				VerifyExpression(node.Expression);
+				if (exprType != Interface.IntType && exprType != Interface.FloatType)
+				{
+					VerifyLValue(node.Expression);
+					Error("Operator '-' expects int or float", node);
+				}
+			}
+			else if (exprType != Interface.IntType && exprType != Interface.FloatType)
+			{
+				VerifyLValue(node.Expression);
+				Error("Operator '" + TokenOp.GetOpName(node.Operator) + "' expects int or float", node);
+			}
+		}
+
+		void VerifyPostOp(PostOpExpressionNode node)
+		{
+			VerifyLValue(node.Expression);
+
+			var exprType = node.Expression.GetTypeOf(_scope);
+			if (exprType != Interface.IntType && exprType != Interface.FloatType)
+				Error("Operator '" + TokenOp.GetOpName(node.Operator) + "' expects int or float", node);
+		}
+
+		void VerifyCondOp(CondOpExpressionNode node)
+		{
+			VerifyExpression(node.Expression1);
+			VerifyExpression(node.Expression2);
+			VerifyExpression(node.Expression3);
+
+			var condType = node.Expression1.GetTypeOf(_scope);
+
+			if (!condType || condType == Interface.NullType)
+				Error("Illegal condition", node.Expression1);
+			else if (condType == Interface.VoidType)
+				Error("Cannot use void type in condition", node.Expression1);
+
+			var res = node.GetTypeOf(_scope);
+			if (!res)
+				Error("Illegal condition operants", node);
+		}
+
+		void VerifyPar(ParExpressionNode node)
+		{
+			VerifyExpression(node.SubExpr);
+		}
+
+		void VerifyNew(NewExpressionNode node)
+		{
+			var intr = node.GetTypeOf(_scope);
+
+			if (intr && (intr.IsArray() || intr.IsMap() || intr == Interface.ObjectType))
+				return;
+
+			if (!intr || intr == Interface.NullType || (intr.GetSymbolType() != SymbolType.Class && !intr.IsArray() && !intr.IsMap()))
+				Error("Illegal type '" + node.NewType.Name + "'", node.NewType);
+
+			if (intr)
+			{
+				var call = new CallExpressionNode("_New");
+				call.ArgList = node.ArgList;
+
+				VerifyArgList(call.ArgList);
+
+				var found = intr ? intr.GetMethod(call, _scope, null) : null;
+				if (!found)
+					Error("Cannot find constructor in class '${intr.Name}'", node);
+
+				if (found && !found.AccessibleFrom(_scope.OwnerMethod))
+					Error("'" + found.Signature() + "' is not accessible from '" + _scope.OwnerMethod.Signature() + "'", node);
+
+			}
+		}
+
+		void VerifyCall(CallExpressionNode node)
+		{
+			VerifyArgList(node.ArgList);
+
+			if (node.IsNative)
+				return;
+
+			var found = _scope.OwnerMethod.Owner.GetMethod(node, _scope, function(Method[] dilemmas) {
+					var ambigious = dilemmas[0].Signature();
+
+					for (int d = 1; d < dilemmas.Length(); d++)
+					{
+						ambigious += ", " + dilemmas[d].Signature();
+					}
+
+					Error("Ambiguous method call. Could be: ${ambigious}", node);
+				});
+
+
+			if (!found)
+			{
+				var func = _scope.GetItem(node.Name);
+				if (!func)
+				{
+					// Might be a field
+					var member = _scope.OwnerMethod.Owner.GetMemberByName(node.Name);
+					if (!member)
+						Error("Cannot find method '${node.Name}()'", node);
+					else
+					{
+						if (member.MemberType == MemberType.Field || member.MemberType == MemberType.Property)
+						{
+							var memberType = ((FunctionType)member.Type);
+
+							var params = memberType.ParamTypes;
+							var args = node.ArgList;
+
+							if (params.Length() != args.Length())
+								Error("'${member.Name}' expects " + params.Length() +  " parameter" + (params.Length() != 1 ? "s" : ""), node);
+							else
+							{
+								var paramTypeNames = "";
+								if (params.Length() > 0)
+								{
+									if (paramTypeNames)
+										paramTypeNames = params[0].Name;
+									else
+										paramTypeNames = "<unknown>";
+
+									for (int p = 1; p < params.Length(); p++)
+									{
+										if (params[p])
+											paramTypeNames += ", " + params[p].Name;
+										else
+											paramTypeNames += ", <unknown>";
+									}
+								}
+
+								for (int p = 0; p < params.Length(); p++)
+								{
+									var paramType = params[p];
+									var argType = args[p].GetTypeOf(_scope);
+
+									if (argType.DistanceTo(paramType) < 0)
+										Error("'${member.Name}' expects (${paramTypeNames})", node);
+								}
+							}
+
+						}
+						else if (member.IsMethod())
+						{
+							var methodMember = (Method)member;
+							if (methodMember.Parameters.Length() != node.ArgList.Length())
+								Error("'${member.Name}' expects " + methodMember.Parameters.Length() + " parameter" + (methodMember.Parameters.Length() != 1 ? "s" : ""), node);
+							else
+							{
+								if (methodMember.Parameters.Length() > 0)
+								{
+									var paramTypeNames = "";
+									
+									if (methodMember.Parameters[0].Type)
+										paramTypeNames = methodMember.Parameters[0].Type.Name;
+									else
+										paramTypeNames = "<unknown>";
+
+									for (int p = 1; p < methodMember.Parameters.Length(); p++)
+									{
+										if (methodMember.Parameters[p].Type)
+											paramTypeNames += ", " + methodMember.Parameters[p].Type.Name;
+										else
+											paramTypeNames += ", <unknown>";
+									}
+
+									Error("'${member.Name}' expects (${paramTypeNames})", node);
+								}
+							}
+						}
+						else
+							Error("Cannot find method '${node.Name}()'", node);
+					}
+				}
+				else
+				{
+					var itemType = func.ItemType;
+					if (!itemType)
+						Error("Unrecognised type", node);
+
+					else if (itemType.IsFunction())
+					{
+						var funcType = (FunctionType)itemType;
+
+						//if (!funcType)
+						//	Error("Cannot find method '${node.Name}()'", node);
+
+						var params = funcType.ParamTypes;
+						var args = node.ArgList;
+
+						if (params.Length() != args.Length())
+							Error("'" + node.Name + "' expects " + params.Length() +  " parameter" + (params.Length() != 1 ? "s" : ""), node);
+						else
+						{
+							var paramTypeNames = "";
+							if (params.Length() > 0)
+							{
+								if (params[0])
+									paramTypeNames = params[0].Name;
+								else
+									paramTypeNames = "<unknown>";
+
+								for (int p = 1; p < params.Length(); p++)
+								{
+									if (params[p])
+										paramTypeNames += ", " + params[p].Name;
+									else
+										paramTypeNames += ", <unknown>";
+								}
+							}
+
+							for (int p = 0; p < params.Length(); p++)
+							{
+								var paramType = params[p];
+								var argType = args[p].GetTypeOf(_scope);
+
+								if (argType.DistanceTo(paramType) < 0)
+									Error("'${node.Name}' expects (${paramTypeNames})", node);
+							}
+						}
+					}
+					else if (itemType != Interface.ObjectType)
+						Error("'" + node.Name + "' is not a method or function", node);
+				}
+			}
+			else
+			{
+				if (!found.AccessibleFrom(_scope.OwnerMethod))
+					Error("'" + found.Signature() + "' is not accessible from '" + _scope.OwnerMethod.Signature() + "'", node);
+
+				if (_scope.OwnerMethod.Static && !found.Static)
+					Error("Cannot call non-static method '" + found.Signature() + "' from static method '" + _scope.OwnerMethod.Signature() + "'", node);
+
+			}
+		}
+
+		void VerifyComplexCall(ComplexCallExpressionNode node)
+		{
+			VerifyExpression(node.Object);
+
+			var objType = node.Object.GetTypeOf(_scope);
+
+			if (objType && objType != Interface.NullType)
+			{
+				if (objType == Interface.ObjectType)
+					VerifyArgList(node.ArgList);
+				else
+				{
+					VerifyArgList(node.ArgList);
+
+					var funcType = (FunctionType)objType;
+
+					var params = funcType.ParamTypes;
+					var args = node.ArgList;
+
+					if (params.Length() != args.Length())
+						Error("Function expects " + params.Length() + " parameter" + (params.Length() != 1 ? "s" : ""), node);
+					else
+					{
+						var paramTypeNames = "";
+						if (params.Length() > 0)
+						{
+							if (params[0])
+								paramTypeNames = params[0].Name;
+							else
+								paramTypeNames = "<unknown>";
+
+							for (int p = 1; p < params.Length(); p++)
+							{
+								if (params[p])
+									paramTypeNames += ", " + params[p].Name;
+								else
+									paramTypeNames += ", <unknown>";
+							}
+						}
+
+						for (int p = 0; p < params.Length(); p++)
+						{
+							var paramType = params[p];
+							var argType = args[p].GetTypeOf(_scope);
+
+							if (argType.DistanceTo(paramType) < 0)
+								Error("Function expects (${paramTypeNames})", node);
+						}
+					}
+				}
+			}
+			else
+				Error("Cannot verify type of object", node);
+		}
+
+		void VerifyBaseCall(BaseCallExpressionNode node)
+		{
+			var baseClass = ((Class)_scope.OwnerMethod.Owner).BaseClass;
+
+			if (!baseClass)
+				Error("Cannot call base method. Base class does not exist", node);
+			else
+			{
+				var found = baseClass.GetMethod(node, _scope, function(Method[] dilemmas) {
+						var ambigious = dilemmas[0].Signature();
+
+						for (int d = 1; d < dilemmas.Length(); d++)
+						{
+							ambigious += ", " + dilemmas[d].Signature();
+						}
+
+						Error("Ambiguous method call. Could be: ${ambigious}", node);
+					});
+
+				if (!found)
+					Error("Cannot find method '${node.Name}'", node);
+
+				else
+				{
+					VerifyArgList(node.ArgList);
+					if (!found.AccessibleFrom(_scope.OwnerMethod))
+						Error("'" + found.Signature() + "' is not accessible from '" + _scope.OwnerMethod.Signature() + "'", node);
+
+					if (_scope.OwnerMethod.Static && !found.Static)
+						Error("Cannot call non-static method '" + found.Signature() + "' from static method '" + _scope.OwnerMethod.Signature() + "'", node);
+
+				}
+			}
+		}
+
+		void VerifyMethodCall(MethodCallExpressionNode node)
+		{
+			VerifyArgList(node.Call.ArgList);
+			bool staticAccess = false;
+
+			var etype = node.Expr.GetTypeOf(_scope);
+
+			if (!etype || etype == Interface.NullType)
+			{
+				staticAccess = true;
+				etype = node.Expr.TryGetType(_scope);
+
+				if (!etype || etype == Interface.NullType)
+				{
+					//:debugger;
+					//etype = node.Expr.TryGetType(_scope);
+					Error("Cannot find method '${node.Call.Name}'", node);
+				}
+			}	
+			else
+				VerifyExpression(node.Expr);
+
+			if (etype == Interface.ObjectType)
+				return;
+			else if (etype)
+			{
+				var found = etype.GetMethod(node.Call, _scope, function(Method[] dilemmas) {
+					var ambigious = dilemmas[0].Signature();
+
+					for (int d = 1; d < dilemmas.Length(); d++)
+					{
+						ambigious += ", " + dilemmas[d].Signature();
+					}
+
+					Error("Ambiguous method call. Could be: ${ambigious}", node);
+				});
+
+				if (!found)
+				{
+					var access = new AccessExpressionNode(node.Expr, node.Call.Name);
+					var objtype = access.GetTypeOf(_scope);
+
+					if (objtype)
+					{
+						if (objtype == Interface.ObjectType)
+						{
+
+						}
+						else if (objtype.IsFunction())
+						{
+							var funcType = (FunctionType)objtype;
+
+							var params = funcType.ParamTypes;
+							var args = node.Call.ArgList;
+
+							if (params.Length() != args.Length())
+								Error("'" + node.Call.Name +  "' expects " + params.Length() + " parameter" + (params.Length() != 1 ? "s" : ""), node);
+							else
+							{
+								var paramTypeNames = "";
+								if (params.Length() > 0)
+								{
+									if (params[0])
+										paramTypeNames = params[0].Name;
+									else
+										paramTypeNames = "<unknown>";
+
+									for (int p = 1; p < params.Length(); p++)
+									{
+										if (params[p])
+											paramTypeNames += ", " + params[p].Name;
+										else
+											paramTypeNames += ", <unknown>";
+									}
+								}
+
+								for (int p = 0; p < params.Length(); p++)
+								{
+									var paramType = params[p];
+									var argType = args[p].GetTypeOf(_scope);
+
+									if (argType.DistanceTo(paramType) < 0)
+										Error("'${node.Call.Name} expects (${paramTypeNames})'", node);
+								}
+							}
+						}
+						else
+							Error("Cannot call method on object of type '${objtype.Name}'", node);
+					}
+					else
+					{
+						var member = etype.GetMemberByName(node.Call.Name);
+						if (!member)
+							Error("Cannot find method '" + node.Call.CallSignature(_scope) + "' in '" + etype.Name + "'", node);
+						else
+						{
+							if (member.IsMethod())
+							{
+								var methodMember = (Method)member;
+
+								if (methodMember.Parameters.Length() != node.Call.ArgList.Length())
+									Error("'${methodMember.Name}' expects " + methodMember.Parameters.Length() + " parameter" + (methodMember.Parameters.Length() != 1 ? "s" : ""), node);
+								else
+								{
+									if (methodMember.Parameters.Length() > 0)
+									{
+										var paramTypes = methodMember.Parameters[0].Type.Name;
+
+										for (int p = 1; p < methodMember.Parameters.Length(); p++)
+											paramTypes += ", " + methodMember.Parameters[p].Type.Name;
+
+										Error("'${methodMember.Name}' expects (${paramTypes})", node);
+									}
+								}
+							}
+						}
+					}
+				}
+				else
+				{
+					if (!found.AccessibleFrom(_scope.OwnerMethod))
+						Error("'" + found.Signature() + "' is not accessible from '" + _scope.OwnerMethod.Signature() + "'", node);
+
+					if (staticAccess && !found.Static)
+						Error("'" + found.Signature() + "' is not static", node);
+				}
+
+			}
+			else
+				Error("Cannot find method '" + node.Call.CallSignature(_scope) + "'", node);
+		}
+
+		void VerifyTypecast(TypecastExpressionNode node)
+		{
+			var typeNode = node.ToType;
+			var expr = node.Expr;
+
+			VerifyExpression(expr);
+
+			var toType = _scope.OwnerMethod.Owner.GetType(typeNode);
+			var fromType = expr.GetTypeOf(_scope);
+
+			if (!toType || toType == Interface.NullType)
+				Error("Unrecognised typecast type", typeNode);
+
+			if (!fromType || fromType == Interface.NullType)
+				Error("Illegal typecast expression", expr);
+
+			if (expr.ExprType == ExpressionType.LitArray)
+			{
+				if (toType)
+				{
+					if (!toType.IsArray())
+						Error("Cannot cast from '${fromType.Name}' to '${toType.Name}'", node);
+					else
+					{
+						var arrayType = (ArrayType)toType;
+						if (!arrayType.CastsTo((LitArrayExpressionNode)expr, _scope))
+							Error("Cannot cast from '${fromType.Name}' to '${toType.Name}'", node);
+					}
+				}
+			}
+			else if (expr.ExprType == ExpressionType.Map)
+			{
+				if (toType)
+				{
+					if (!toType.IsMap())
+					{
+						if (toType.IsInline() || toType.IsDefined)
+						{
+							if (!toType.CastsTo((LitMapExpressionNode)expr, _scope))
+								Error("Cannot cast from '${fromType.Name}' to '${toType.Name}'", node);
+						}
+						else
+							Error("Cannot cast from '${fromType.Name}' to '${toType.Name}'", node);
+					}
+					else
+					{
+						var mapType = (MapType)toType;
+						if (!mapType.CastsTo((LitMapExpressionNode)expr, _scope))
+							Error("Cannot cast from '${fromType.Name}' to '${toType.Name}'", node);
+					}
+				}
+			}
+			else if (toType && fromType)
+			{
+				if (toType == Interface.StringType)	return;
+				if (toType.DistanceTo(fromType) < 0 && fromType.DistanceTo(toType) < 0)
+					Error("Cannot cast from '${fromType.Name}' to '${toType.Name}'", node);
+			}
+		}
+
+		void VerifyAssemblyExpr(AssemblyExpressionNode node)
+		{
+		}
+
+		void VerifyHTML(HTMLExpressionNode node)
+		{
+			var exprType = node.Elem;
+			var exprElem = node.ElemExpression;
+			var attr = node.Attributes;
+			var children = node.Children;
+			var clone = node.AttributeClone;
+
+			if (!node.IsBasic())
+			{
+				if (exprElem)
+				{
+					var elemExprType = exprElem.GetTypeOf(_scope);
+					if (elemExprType != Interface.StringType)
+						Error("Element type expression must be string", exprElem);
+				}
+				else if (exprType)
+				{
+					var templ = (Template)_scope.OwnerMethod.Owner.GetType(exprType);
+					if (!templ)
+						Error("Cannot find template '${exprType.Name}'", node);
+					else if (templ.GetSymbolType() != SymbolType.Template && templ.GetSymbolType() != SymbolType.ServerComponent)
+					{
+						Error("'${exprType.Name}' is not a template or component", node);
+					}
+				}
+			}
+
+			foreach (var attrKey in attr.Keys())
+				VerifyExpression(attr[attrKey]);
+
+			foreach (var child in children)
+				VerifyExpression(child);
+
+
+			if (clone)
+			{
+				VerifyExpression(clone);
+
+				var cloneType = clone.GetTypeOf(_scope);
+				if (cloneType)
+				{
+					if (!cloneType.IsMap())
+						Error("HTML attribute clone must be map type", clone);
+				}
+				else
+					Error("Illegal attribute clone type", clone);
+			}
+		}
+
+		void VerifyHTMLText(HTMLTextExpressionNode node)
+		{
+			var textType = node.Text.GetTypeOf(_scope);
+			if (textType != Interface.StringType)
+				Error("Expected string", node);
+
+			VerifyExpression(node.Text);
+		}
+
+		void VerifyHTMLCode(HTMLCodeExpressionNode node)
+		{
+			VerifyExpression(node.Code);
+		}
+
+
+		void VerifyArgList(ExpressionNode[] args)
+		{
+			if (args)
+			{
+				foreach (var arg in args)
+					VerifyExpression(arg);
+			}
+		}
+
+
+
+
+		// --------------------------------------------------------
+		// Utility
+		// --------------------------------------------------------
+
+
+		void Error(string message, ParseNode node)
+		{
+			_semanticAnalyser.Error(_curFileId, message, node);
+		}
+
+		void AddScope()
+		{
+			if (_scope)
+			{
+				var newScope = new Scope(_scope.OwnerMethod, _scope);
+				_scope = newScope;
+			}
+		}
+
+		void AddScope(Method method)
+		{
+			if (_scope)
+			{
+				var newScope = new Scope(method, _scope);
+				_scope = newScope;
+			}
+		}
+
+		void PopScope()
+		{
+			if (_scope)
+				_scope = _scope.Parent;
+		}
+
+	}
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,2731 @@
+/*
+* eco library (client)
+*
+* parsenodes.eco
+*/
+
+using std;
+
+
+namespace eco
+{
+	
+	/** Node type */
+	enum ASTType
+	{
+		None,
+		Import,
+		Namespace,
+		Interface,
+		Class,
+		Enum,
+		Template,
+		ServerComponent,
+		ClientComponent,
+		Initialiser,
+		Service,
+		Typedef,
+
+		Type,
+		ArrayType,
+		MapType,
+		FunctionType,
+		EventType,
+		InlineType,
+
+		Member,
+		Field,
+		Property,
+		Method,
+
+		Statement
+	}
+
+
+	/** Parser context */
+	enum ParserContext
+	{
+		Namespace,
+		Interface,
+		Class,
+		ClassInfo,
+		Member,
+
+		Type,
+		New,
+
+		Using
+	}
+
+
+	/** Parse node */
+	class ParseNode
+	{
+		new()
+		{
+		}
+
+		/** Node type */
+		ASTType Type : protected _astType
+		{
+			get return _astType;
+			set _astType = value;
+		}
+
+		/** Start line */
+		int StartLine : protected _startLine
+		{
+			get return _startLine;
+			set _startLine = value;
+		}
+
+		/** End line */
+		int EndLine : protected _endLine
+		{
+			get return _endLine;
+			set _endLine = value;
+		}
+
+		/** Start column */
+		int StartColumn : protected _startColumn
+		{
+			get return _startColumn;
+			set _startColumn = value;
+		}
+
+		/** End column */
+		int EndColumn : protected _endColumn
+		{
+			get return _endColumn;
+			set _endColumn = value;
+		}
+
+		/** Start position */
+		int StartPosition : protected _startPosition
+		{
+			get return _startPosition;
+			set _startPosition = value;
+		}
+
+		/** End position */
+		int EndPosition : protected _endPosition
+		{
+			get return _endPosition;
+			set _endPosition = value;
+		}
+
+
+		/** Set positions from state */
+		virtual void SetFromState(LexerState state)
+		{
+			_startLine = state.Line;
+			_startColumn = state.Column;
+			_startPosition = state.Position;
+		}
+	}
+
+
+	/** Import node */
+	class ImportNode : ParseNode
+	{
+		new(string importFile)
+		{
+			_astType = ASTType.Import;
+			ImportFile = importFile;
+
+			AsNames = [];
+		}
+
+		string ImportFile;
+		string[] AsNames;
+	}
+
+	// ------------------------------------------------
+	// Symbol nodes
+	// ------------------------------------------------
+
+
+	/** Namespace node. Super class of classes too */
+	class NamespaceNode : ParseNode
+	{
+		new(string name)
+		{
+			_name = name;
+			_astType = ASTType.Namespace;
+			_docs = null;
+		}
+
+		/** Definition end line */
+		int DefinitionEndLine : protected _defEndLine
+		{
+			get return _defEndLine;
+			set _defEndLine = value;
+		}
+
+		/** Definition end column */
+		int DefinitionEndColumn : protected _defEndColumn
+		{
+			get return _defEndColumn;
+			set _defEndColumn = value;
+		}
+
+		/** Get and set name */
+		string Name : protected _name
+		{
+			get return _name;
+			set _name = value;
+		}
+
+		/** Child nodes */
+		NamespaceNode[] Children : protected _children = []
+		{
+			get return _children;
+		}
+
+		/** Add child node */
+		void AddChild(NamespaceNode node)
+		{
+			_children.Add(node);
+		}
+
+		/** Used namespaces */
+		TypeNode[] UsedNamespaces : protected _usedNamespaces = []
+		{
+			get return _usedNamespaces;
+		}
+
+		/** Use a namespace */
+		void UseNamespace(TypeNode node)
+		{
+			_usedNamespaces.Add(node);
+		}
+
+
+		SymbolDoc Docs : protected _docs
+		{
+			get return _docs;
+			set _docs = value;
+		}
+	}
+
+
+	/** Interface node */
+	class InterfaceNode : NamespaceNode
+	{
+		new(string name) : base(name)
+		{
+			_astType = ASTType.Interface;
+		}
+
+		/*MethodNode[] Methods : private _methods = []
+		{
+			get return _methods;
+		}
+
+		void AddMethod(MethodNode method)
+		{
+			_methods.Add(method);
+		}*/
+
+		MemberNode[] Members : private _members = []
+		{
+			get return _members;
+		}
+
+		void AddMember(MemberNode member)
+		{
+			_members.Add(member);
+		}
+	}
+
+	/** Typedef node */
+	class TypedefNode : InterfaceNode
+	{
+		new(string name) : base(name)
+		{
+			_astType = ASTType.Typedef;
+		}
+
+		TypeNode OtherType : private _otherType
+		{
+			get return _otherType;
+			set _otherType = value;
+		}
+	}
+
+	/** Class node */
+	class ClassNode : NamespaceNode
+	{
+		new(string name) : base(name)
+		{
+			_astType = ASTType.Class;
+			_interaces = [];
+			_members = [];
+			_isNative = false;
+		}
+
+		TypeNode BaseClass : protected _baseClass = null
+		{
+			get return _baseClass;
+			set _baseClass = value;
+		}
+
+		TypeNode[] Interfaces : protected _interaces
+		{
+			get return _interaces;
+		}
+
+		MemberNode[] Members : protected _members
+		{
+			get return _members;
+		}
+
+		void AddMember(MemberNode member)
+		{
+			_members.Add(member);
+		}
+
+
+		bool IsNative : private _isNative
+		{
+			get return _isNative;
+			set _isNative = value;
+		}
+
+
+		void Implement(TypeNode intrface)
+		{
+			_interaces.Add(intrface);
+		}
+	}
+
+
+	/** Component server side node */
+	class ComponentServerNode : ClassNode
+	{
+		new(string name) : base(name)
+		{
+			_astType = ASTType.ServerComponent;
+			_compUsings = [];
+		}
+
+		TypeNode[] ComponentUsings : private _compUsings
+		{
+			get return _compUsings;
+		}
+
+		void AddComponentUsing(TypeNode used)
+		{
+			_compUsings.Add(used);
+		}
+	}
+
+	/** Component client side node */
+	class ComponentClientNode : ClassNode
+	{
+		new(string name) : base(name)
+		{
+			_astType = ASTType.ClientComponent;
+			_compUsings = [];
+		}
+
+		TypeNode[] ComponentUsings : private _compUsings
+		{
+			get return _compUsings;
+		}
+
+		void AddComponentUsing(TypeNode used)
+		{
+			_compUsings.Add(used);
+		}
+	}
+
+	/** Initialiser node */
+	class InitialiserNode : ClassNode
+	{
+		new(string name) : base(name)
+		{
+			_astType = ASTType.Initialiser;
+			_initUsings = [];
+		}
+
+		TypeNode[] InitUsings : private _initUsings
+		{
+			get return _initUsings;
+		}
+
+		void AddInitialiserUsing(TypeNode used)
+		{
+			_initUsings.Add(used);
+		}
+	}
+
+
+	/** Service node */
+	class ServiceNode : ClassNode
+	{
+		new(string name) : base(name)
+		{
+			_astType = ASTType.Service;
+			_serviceUsings = [];
+		}
+
+		TypeNode[] ServiceUsings : private _serviceUsings
+		{
+			get return _serviceUsings;
+		}
+
+		void AddServiceUsing(TypeNode used)
+		{
+			_serviceUsings.Add(used);
+		}
+	}
+
+
+	/** Enum node */
+	class EnumNode : NamespaceNode
+	{
+		new(string name) : base(name)
+		{
+			_astType = ASTType.Enum;
+		}
+
+		map<int> KVPairs : _kv = {}
+		{
+			get return _kv;
+		}
+	}
+
+
+	/** Template node */
+	class TemplateNode : ClassNode
+	{
+		new(string name) : base(name)
+		{
+			_astType = ASTType.Template;
+			_parameters = [];
+		}
+
+		array Parameters : private _parameters
+		{
+			get return _parameters;
+		}
+
+		void AddParameter(TypeNode type, string name, ExpressionNode defaultValue)
+		{
+			_parameters.Add({type: type, name: name, defaultValue: defaultValue});
+		}
+
+		MethodNode MainMethod : private _mainMethod
+		{
+			get return _mainMethod;
+			set _mainMethod = value;
+		}
+
+	}
+
+
+
+	// ------------------------------------------------
+	// Member nodes
+	// ------------------------------------------------
+
+
+
+	/** Member access */
+	enum MemberAccess
+	{
+		Public,
+		Protected,
+		Private
+	}
+
+
+	/** Member node */
+	class MemberNode : ParseNode
+	{
+		new(TypeNode type, string name)
+		{
+			_type = type;
+			_name = name;
+			_docs = null;
+
+			_astType = ASTType.Member;
+		}
+
+		TypeNode Type : protected _type
+		{
+			get return _type;
+		}
+
+		string Name : protected _name
+		{
+			get return _name;
+		}
+
+		MemberAccess Access : protected _access
+		{
+			get return _access;
+			set _access = value;
+		}
+
+		bool Static : protected _static = false
+		{
+			get return _static;
+			set _static = value;
+		}
+
+		SymbolDoc Docs : protected _docs
+		{
+			get return _docs;
+			set _docs = value;
+		}
+
+		virtual bool IsField() { return false; }
+		virtual bool IsMethod() { return false; }
+		virtual bool IsProperty() { return false; }
+		virtual bool IsConstructor() { return false; }
+		virtual bool IsServerRender() { return false; }
+		virtual bool IsTemplateMethod() { return false; }
+	}
+
+
+	/** Field node */
+	class FieldNode : MemberNode
+	{
+		new(TypeNode type, string name) : base(type, name)
+		{
+			_astType = ASTType.Field;
+		}
+
+		bool IsField() { return true; }
+
+		ExpressionNode Default : private _defaultValue
+		{
+			get return _defaultValue;
+			set _defaultValue = value;
+		}
+	}
+
+
+	/** Method node */
+	class MethodNode : MemberNode
+	{
+		new(TypeNode type, string name) : base(type, name)
+		{
+			_astType = ASTType.Method;
+			_params = [];
+		}
+
+		bool Virtual : private _virtual
+		{
+			get return _virtual;
+			set _virtual = value;
+		}
+
+		bool Aliased : private _aliased
+		{
+			get return _aliased;
+			set _aliased = value;
+		}
+
+		array Params : private _params
+		{
+			get return _params;
+		}
+
+		void AddParam(TypeNode type, string name, LitExpressionNode defaultValue = null)
+		{
+			_params.Add({type: type, name: name, defaultValue: defaultValue});
+		}
+
+		BlockNode Block : protected _block
+		{
+			get return _block;
+			set _block = value;
+		}
+
+		bool IsMethod() { return true; }
+	}
+
+
+	/** Constructor node */
+	class ConstructorNode : MethodNode
+	{
+		new() : base(null, "new")
+		{
+		}
+
+		CallExpressionNode BaseCall : private _baseCall
+		{
+			get return _baseCall;
+			set _baseCall = value;
+		}
+
+		bool IsConstructor() { return true; }
+	}
+
+
+	/** Server render node */
+	class ServerRenderNode : MethodNode
+	{
+		new() : base(null, "Render")
+		{
+		}
+
+		bool IsServerRender() { return true; }
+	}
+
+	/** Template render node */
+	class TemplateRenderNode : MethodNode
+	{
+		new(TypeNode type, string name) : base(type, name)
+		{
+		}
+
+		bool IsTemplateMethod() { return true; }
+	}
+
+
+	/** Property node */
+	class PropertyNode : MemberNode
+	{
+		new(TypeNode type, string name) : base(type, name)
+		{
+			_astType = ASTType.Property;
+		}
+
+		string FieldName : private _fieldName
+		{
+			get return _fieldName;
+			set _fieldName = value;
+		}
+
+		StatementNode Getter : private _getter
+		{
+			get return _getter;
+			set _getter = value;
+		}
+
+		bool GetterIsBlock : private _getterIsBlock
+		{
+			get return _getterIsBlock;
+			set _getterIsBlock = value;
+		}
+
+		StatementNode Setter : private _setter
+		{
+			get return _setter;
+			set _setter = value;
+		}
+
+		bool SetterIsBlock : private _setterIsBlock
+		{
+			get return _setterIsBlock;
+			set _setterIsBlock = value;
+		}
+
+		bool IsProperty() { return true; }
+	}
+
+
+
+
+
+	// ------------------------------------------------
+	// Type nodes
+	// ------------------------------------------------
+
+
+
+	/** Type node */
+	class TypeNode : ParseNode
+	{
+		new(string name)
+		{
+			_name = name;
+			_astType = ASTType.Type;
+			_fullName = "";
+		}
+
+		TypeNode Parent : private _parent
+		{
+			get return _parent;
+			set _parent = value;
+		}
+
+		string Name : protected _name
+		{
+			get return _name;
+		}
+
+		string FullName : private _fullName
+		{
+			get
+			{
+				if (_fullName == "")
+					_fullName = GetFullName();
+
+				return _fullName;
+			}
+		}
+
+		virtual string GetFullName()
+		{
+			if (_parent)
+				return _parent.FullName + "." + _name;
+			return _name;
+		}
+
+
+
+		static TypeNode VarType
+		{
+			get
+			{
+				if (!_varType)
+					_varType = new TypeNode("var");
+
+				return _varType;
+			}
+		}
+
+		virtual bool IsArray() { return false; }
+		virtual bool IsMap() { return false; }
+		virtual bool IsFunction() { return false; }
+		virtual bool IsEvent() { return false; }
+		virtual bool IsInline() { return false; }
+
+
+		/** Generate a type from a string */
+		static TypeNode Generate(string typeString)
+		{
+			var parts = typeString.Split(".");
+
+			var intr = new TypeNode(parts[0]);
+			for (int i = 1; i < parts.Length(); i++)
+			{
+				var newType = new TypeNode(parts[i]);
+				newType.Parent = intr;
+				intr = newType;
+			}
+
+			return intr;
+		}
+
+	private:
+		static TypeNode _varType = null;
+	}
+
+
+	/** Inline interface node */
+	class InlineInterfaceNode : TypeNode
+	{
+		new() : base("type{}")
+		{
+			_astType = ASTType.InlineType;
+			_members = [];
+		}
+
+		MemberNode[] Members : private _members
+		{
+			get return _members;
+		}
+
+		void AddMember(MemberNode member)
+		{
+			_members.Add(member);
+
+			_name = "type{";
+
+			var getMemberName = function(MemberNode member):string {
+				string name = member.Type.FullName + " " + member.Name;
+				if (member.IsMethod())
+				{
+					name += "(";
+					var methodMember = (MethodNode)member;
+					if (methodMember.Params.Length() > 0)
+					{
+						name += ((TypeNode)methodMember.Params[0].type).FullName + " " + (string)methodMember.Params[0].name;
+
+						for (int p = 1; p < methodMember.Params.Length(); p++)
+						{
+							name += ", " + ((TypeNode)methodMember.Params[p].type).FullName + " " + (string)methodMember.Params[p].name;
+						}
+					}
+					name += ")";
+				}
+
+				return name;
+			};
+
+			_name += getMemberName(_members[0]);
+
+			for (int m = 1; m < _members.Length(); m++)
+				_name += ", " + getMemberName(_members[m]);
+
+			_name += "}";
+		}
+
+		bool IsInline() { return true; }
+		
+	}
+
+
+	/** Array type node */
+	class ArrayTypeNode : TypeNode
+	{
+		new(TypeNode elem) : base( elem ? (elem.FullName + "[]") : "array" )
+		{
+			_elem = elem;
+			_astType = ASTType.ArrayType;
+		}
+
+		TypeNode Elem : private _elem
+		{
+			get return _elem;
+		}
+
+		bool IsArray() { return true; }
+	}
+
+	/** Map type node */
+	class MapTypeNode : TypeNode
+	{
+		new(TypeNode elem) : base( elem ? ("map<" +  elem.FullName + ">") : "map" )
+		{
+			_elem = elem;
+			_astType = ASTType.MapType;
+		}
+
+		TypeNode Elem : private _elem
+		{
+			get return _elem;
+		}
+
+		bool IsMap() { return true; }
+	}
+
+
+	/** Event type node */
+	class EventTypeNode : TypeNode
+	{
+		new() : base("event")
+		{
+			_astType = ASTType.EventType;
+		}
+
+		TypeNode[] ParamTypes : private _paramTypes = []
+		{
+			get return _paramTypes;
+		}
+
+		void AddParamType(TypeNode type)
+		{
+			_paramTypes.Add(type);
+		}
+
+		string GetFullName()
+		{
+			var fullName = "event<";
+
+			int count = 0;
+			foreach (var p in _paramTypes)
+			{
+				if (count > 0) fullName += ",";
+				fullName += p.FullName;
+				count++;
+			}
+
+			fullName += ">";
+
+			return fullName;
+		}
+
+
+		bool IsEvent() { return true; }
+	}
+
+	/** Function type node */
+	class FunctionTypeNode : TypeNode
+	{
+		new() : base("function")
+		{
+			_astType = ASTType.FunctionType;
+		}
+
+		TypeNode ReturnType : private _retType
+		{
+			get return _retType;
+			set _retType = value;
+		}
+
+		TypeNode[] ParamTypes : private _paramTypes = []
+		{
+			get return _paramTypes;
+		}
+		string[] ParamNames : private _paramNames = []
+		{
+			get return _paramNames;
+		}
+
+		void AddParamType(TypeNode type)
+		{
+			_paramTypes.Add(type);
+			_paramNames.Add("v" + _paramTypes.Length());
+		}
+
+		void AddParam(TypeNode type, string name)
+		{
+			_paramTypes.Add(type);
+			_paramNames.Add(name);
+		}
+
+		string GetFullName()
+		{
+			var fullName = "function<";
+
+			int count = 0;
+			foreach (var p in _paramTypes)
+			{
+				if (count > 0) fullName += ",";
+				fullName += p.FullName;
+				count++;
+			}
+
+			fullName += ">";
+
+			if (_retType)
+				fullName += ":" + _retType.FullName;
+
+			return fullName;
+		}
+
+
+		bool IsFunction() { return true; }
+	}
+
+
+	// ------------------------------------------------
+	// Statement nodes
+	// ------------------------------------------------
+
+	enum StatementType
+	{
+		None,
+
+		Block,
+		VarDecl,
+
+		If,
+		For,
+		Foreach,
+		While,
+		Switch,
+		Case,
+		Default,
+		TryCatch,
+		Throw,
+		Target,
+		Await,
+
+		Return,
+		Break,
+		Continue,
+		Assembly,
+
+		Expression
+	}
+
+
+	/** Statement node */
+	class StatementNode : ParseNode
+	{
+		new()
+		{
+			_astType = ASTType.Statement;
+		}
+
+		StatementType StmtType : protected _stmtType
+		{
+			get return _stmtType;
+		}
+	}
+
+
+	/** Block node */
+	class BlockNode : StatementNode
+	{
+		new()
+		{
+			_stmtType = StatementType.Block;
+			_statements = [];
+		}
+
+		StatementNode[] Statements : private _statements
+		{
+			get return _statements;
+		} 
+
+		void AddStatement(StatementNode stmt)
+		{
+			_statements.Add(stmt);
+		}
+	}
+
+
+	/** Variable declaration */
+	class VarDeclNode : StatementNode
+	{
+		new(string name)
+		{
+			_stmtType = StatementType.VarDecl;
+			_name = name;
+		}
+
+		string Name : private _name
+		{
+			get return _name;
+		}
+
+		TypeNode VarType : private _varType
+		{
+			get return _varType;
+			set _varType = value;
+		}
+
+		ExpressionNode Expr : private _expr
+		{
+			get return _expr;
+			set _expr = value;
+		}
+	}
+
+
+	/** Return node */
+	class ReturnNode : StatementNode
+	{
+		new()
+		{
+			_stmtType = StatementType.Return;
+			_returnValue = null;
+		}
+
+		ExpressionNode ReturnValue : private _returnValue
+		{
+			get return _returnValue;
+			set _returnValue = value;
+		}
+	}
+
+
+	/** If statement node */
+	class IfNode : StatementNode
+	{
+		new()
+		{
+			_stmtType = StatementType.If;
+		}
+
+		ExpressionNode Condition : private _cond
+		{
+			get return _cond;
+			set _cond = value;
+		}
+
+		StatementNode Then : private _then
+		{
+			get return _then;
+			set _then = value;
+		}
+
+		StatementNode Else : private _else
+		{
+			get return _else;
+			set _else = value;
+		}
+	}
+
+
+	/** While node */
+	class WhileNode : StatementNode
+	{
+		new()
+		{
+			_stmtType = StatementType.While;
+		}
+
+		ExpressionNode Condition : private _cond
+		{
+			get return _cond;
+			set _cond = value;
+		}
+
+		StatementNode Statement : private _stmt
+		{
+			get return _stmt;
+			set _stmt = value;
+		}
+	}
+
+
+	/** For loop */
+	class ForNode : StatementNode
+	{
+		new()
+		{
+			_stmtType = StatementType.For;
+		}
+
+		StatementNode Init : private _init
+		{
+			get return _init;
+			set _init = value;
+		}
+
+		ExpressionNode Condition : private _condition
+		{
+			get return _condition;
+			set _condition = value;
+		}
+
+		ExpressionNode Update : private _update
+		{
+			get return _update;
+			set _update = value;
+		}
+
+		StatementNode Statement : private _stmt
+		{
+			get return _stmt;
+			set _stmt = value;
+		}
+	}
+
+
+	// Foreach loop
+	class ForeachNode : StatementNode
+	{
+		new()
+		{
+			_stmtType = StatementType.Foreach;
+		}
+
+		TypeNode IteratorType : private _iterType
+		{
+			get return _iterType;
+			set _iterType = value;
+		}
+
+		TypeNode IteratorType2 : private _iterType2
+		{
+			get return _iterType2;
+			set _iterType2 = value;
+		}
+
+		string IteratorName : private _iterName
+		{
+			get return _iterName;
+			set _iterName = value;
+		}
+
+		string IteratorName2 : private _iterName2
+		{
+			get return _iterName2;
+			set _iterName2 = value;
+		}
+
+		ExpressionNode Collection : private _collection
+		{
+			get return _collection;
+			set _collection = value;
+		}
+
+		StatementNode Statement : private _statement
+		{
+			get return _statement;
+			set _statement = value;
+		}
+	}
+
+	/** Break statement */
+	class BreakNode : StatementNode
+	{
+		new()
+		{
+			_stmtType = StatementType.Break;
+		}
+	}
+
+	/** Continue statement */
+	class ContinueNode : StatementNode
+	{
+		new()
+		{
+			_stmtType = StatementType.Continue;
+		}
+	}
+
+
+	/** Assembly node */
+	class AssemblyNode : StatementNode
+	{
+		new()
+		{
+			_stmtType = StatementType.Assembly;
+			_targets = [];
+		}
+
+		string Code : private _code
+		{
+			get return _code;
+			set _code = value;
+		}
+
+		string[] Targets : private _targets
+		{
+			get return _targets;
+		}
+
+		void AddTarget(string target)
+		{
+			_targets.Add(target);
+		}
+
+		bool HasTarget(string target)
+		{
+			foreach (var t in _targets)
+				if (t == target)
+					return true;
+
+			return false;
+		}
+
+		/*Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			return Interface.ObjectType;
+		}*/
+	}
+
+
+	/** Target node */
+	class TargetNode : StatementNode
+	{
+		new()
+		{
+			_stmtType = StatementType.Target;
+			_targets = [];
+		}
+
+		string[] Targets : private _targets
+		{
+			get return _targets;
+		}
+
+		void AddTarget(string target)
+		{
+			_targets.Add(target);
+		}
+
+		bool HasTarget(string target)
+		{
+			foreach (var t in _targets)
+				if (t == target)
+					return true;
+
+			return false;
+		}
+
+		BlockNode Block : private _block
+		{
+			get return _block;
+			set _block = value;
+		}
+	}
+
+
+	/** Try/Catch statement */
+	class TryCatchNode : StatementNode
+	{
+		new()
+		{
+			_stmtType = StatementType.TryCatch;
+		}
+
+		BlockNode TryBlock : private _tryBlock
+		{
+			get return _tryBlock;
+			set _tryBlock = value;
+		}
+
+		BlockNode CatchBlock : private _catchBlock
+		{
+			get return _catchBlock;
+			set _catchBlock = value;
+		}
+
+		TypeNode CatchType : private _catchType
+		{
+			get return _catchType;
+			set _catchType = value;
+		}
+
+		string CatchName : private _catchName
+		{
+			get return _catchName;
+			set _catchName = value;
+		}
+	}
+
+
+	/** Throw statement */
+	class ThrowNode : StatementNode
+	{
+		new()
+		{
+			_stmtType = StatementType.Throw;
+		}
+
+		ExpressionNode Expression : private _expr
+		{
+			get return _expr;
+			set _expr = value;
+		}
+	}
+
+
+	/** Case node */
+	class CaseNode : StatementNode
+	{
+		new()
+		{
+			_stmtType = StatementType.Case;
+			_statements = [];
+		}
+
+		ExpressionNode Value : private _value
+		{
+			get return _value;
+			set _value = value;
+		}
+
+		StatementNode[] Statements : private _statements
+		{
+			get return _statements;
+		}
+
+		void AddStatement(StatementNode statement)
+		{
+			_statements.Add(statement);
+		}
+	}
+
+
+	/** Default statement */
+	class DefaultNode : StatementNode
+	{
+		new()
+		{
+			_stmtType = StatementType.Default;
+			_statements = [];
+		}
+
+		StatementNode[] Statements : private _statements
+		{
+			get return _statements;
+		}
+
+		void AddStatement(StatementNode statement)
+		{
+			_statements.Add(statement);
+		}
+	}
+
+
+	/** Switch/case */
+	class SwitchCaseNode : StatementNode
+	{
+		new()
+		{
+			_stmtType = StatementType.Switch;
+			_cases = [];
+		}
+
+		ExpressionNode Value : private _value
+		{
+			get return _value;
+			set _value = value;
+		}
+
+		CaseNode[] Cases : private _cases
+		{
+			get return _cases;
+		}
+
+		void AddCase(CaseNode caseNode)
+		{
+			_cases.Add(caseNode);
+		}
+
+		DefaultNode DefaultCase : private _defaultCase
+		{
+			get return _defaultCase;
+			set _defaultCase = value;
+		}
+	}
+
+
+	/** Await parse node */
+	class AwaitNode : StatementNode
+	{
+		new()
+		{
+			_stmtType = StatementType.Await;
+			_argList = [];
+			_statusVarName = "";
+		}
+
+		TypeNode Responder : private _responder
+		{
+			get return _responder;
+			set _responder = value;
+		}
+
+		ExpressionNode[] ArgList : private _argList
+		{
+			get return _argList;
+		}
+
+		TypeNode ResultType : private _resultType
+		{
+			get return _resultType;
+			set _resultType = value;
+		}
+
+		string ResultVarName : private _resultVarName
+		{
+			get return _resultVarName;
+			set _resultVarName = value;
+		}
+
+		string StatusVarName : private _statusVarName
+		{
+			get return _statusVarName;
+			set _statusVarName = value;
+		}
+
+		BlockNode Block : private _block
+		{
+			get return _block;
+			set _block = value;
+		}
+	}
+
+
+	// ------------------------------------------------
+	// Expression nodes
+	// ------------------------------------------------
+
+	enum ExpressionType
+	{
+		None,
+
+		Lit,
+		Load,
+		Access,
+		ArrayAccess,
+		LitArray,
+		Map,
+		Function,
+		Op,
+		PreOp,
+		PostOp,
+		CondOp,
+		Par,
+		New,
+		Call,
+		ComplexCall,
+		BaseCall,
+		MethodCall,
+		Typecast,
+		Assembly,
+
+		HTML,
+		HTMLText,
+		HTMLCode,
+
+		FullPckName	// Used for identifying component classes in HTML, e.g. <div data-compcls="{fullpckname}"/>
+					// Not sure if needed yet
+	}
+
+
+	/** Expression */
+	class ExpressionNode : StatementNode
+	{
+		static function<ExpressionNode> OnCreatedAndSet;
+		
+		new()
+		{
+			_stmtType = StatementType.Expression;
+			_exprType = ExpressionType.None;	
+		}
+
+		ExpressionType ExprType : protected _exprType
+		{
+			get return _exprType;
+		}
+
+		Interface SymbolType : protected _symbolType
+		{
+			get return _symbolType;
+			set _symbolType = value;
+		}
+
+		virtual Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			return null;
+		}
+
+		virtual Interface TryGetType(Scope scope)
+		{
+			return null;
+		}
+
+		virtual string GenerateTypeString()
+		{
+			return "";
+		}
+
+		void SetFromState(LexerState state)
+		{
+			base.SetFromState(state);
+
+			if (OnCreatedAndSet) OnCreatedAndSet(this);
+		}
+	}
+
+
+	/** Literal expression */
+	class LitExpressionNode : ExpressionNode
+	{
+		new(Token lit)
+		{
+			_exprType = ExpressionType.Lit;
+			_lit = lit;
+		}
+
+		Token Literal : private _lit
+		{
+			get return _lit;
+			set _lit = value;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			switch (_lit.Type)
+			{
+				case TokenType.Bool:		return Interface.BoolType;
+				case TokenType.Char:		return Interface.CharType;
+				case TokenType.Int:			return Interface.IntType;
+				case TokenType.Float:		return Interface.FloatType;
+				case TokenType.String:		return Interface.StringType;
+		        case TokenType.AsmStr:		return Interface.ObjectType;
+		        case TokenType.K_This:		return scope.OwnerMethod.Owner;
+		        case TokenType.K_True:		return Interface.BoolType;
+		        case TokenType.K_False:		return Interface.BoolType;
+		        case TokenType.K_Null:		return Interface.NullType;
+			}
+		}
+	}
+
+	/** Load expression */
+	class LoadExpressionNode : ExpressionNode
+	{
+		new(string varName, bool defined = false)
+		{
+			_exprType = ExpressionType.Load;
+			_varName = varName;
+			_beingDefined = defined;
+		}
+
+		string VarName : private _varName
+		{
+			get return _varName;
+			set _varName = value;
+		}
+
+		bool IsBeingDefined : private _beingDefined
+		{
+			get return _beingDefined;
+		}
+
+		bool IsNative : private _native
+		{
+			get return _native;
+			set _native = value;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			if (_native)
+				return Interface.ObjectType;
+
+			var found = scope.GetItem(_varName);
+			if (found)
+				return found.ItemType;
+
+			var owner = scope.OwnerMethod.Owner;
+
+			var members = owner.GetAllMembers();
+			foreach (var member in members)
+			{
+				if (member.Name == _varName && (member.IsField() || member.IsProperty()))
+					return member.Type;
+			}
+
+			return null;
+		}
+
+		Interface TryGetType(Scope scope)
+		{
+			var typeNode = new TypeNode(_varName);
+			return scope.OwnerMethod.Owner.GetType(typeNode);
+		}
+
+		string GenerateTypeString()
+		{
+			return _varName;
+		}
+	}
+
+
+	/** Access expression */
+	class AccessExpressionNode : ExpressionNode
+	{
+		new(ExpressionNode expr, string field)
+		{
+			_exprType = ExpressionType.Access;
+			_expr = expr;
+			_field = field;
+		}
+
+		ExpressionNode Expression : private _expr
+		{
+			get return _expr;
+			set _expr = value;
+		}
+
+		string Field : private _field
+		{
+			get return _field;
+			set _field = value;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			var exprType = _expr.GetTypeOf(scope, parser);
+			if (exprType == Interface.ObjectType)
+				return Interface.ObjectType;
+
+			if (!exprType || exprType == Interface.NullType)
+			{
+				exprType = _expr.TryGetType(scope);
+
+				if (!exprType)
+					return null;
+			}
+
+			if (exprType.IsMap())
+				return ((MapType)exprType).Elem;
+
+			if (exprType.IsEnum())
+			{
+				var enumType = (Enum)exprType;
+				if (!enumType.KVPairs.HasKey(_field))
+					return null;
+
+				return exprType;
+			}
+
+			if (exprType.IsClass())
+			{
+				var cur = (Class)exprType;
+				while (cur)
+				{
+					var members = cur.Members;
+					foreach (var member in members)
+					{
+						if ((member.IsField() || member.IsProperty()) && member.Name == _field)
+							return member.Type;
+					}
+
+					cur = cur.BaseClass;
+				}
+			}
+
+			if (exprType.IsInline() || exprType.IsDefined)
+			{
+				var members = ((InlineInterface)exprType).Members;
+				foreach (var member in members)
+				{
+					if ((member.IsField() || member.IsProperty()) && member.Name == _field)
+						return member.Type;
+				}
+			}
+			return null;
+		}
+
+		Interface TryGetType(Scope scope)
+		{
+			var type1 = _expr.TryGetType(scope);
+			if (!type1)
+			{
+				ExpressionNode cur = this;
+				var str = "";
+				while (cur)
+				{
+					if (cur.ExprType == ExpressionType.Load)
+					{
+						str = ((LoadExpressionNode)cur).VarName + "." + str;
+						cur = null;
+					}
+					else if (cur.ExprType == ExpressionType.Access)
+					{
+						str = ((AccessExpressionNode)cur)._field + "." + str;
+						cur = ((AccessExpressionNode)cur)._expr;
+					}
+					else
+						return null;
+				}
+
+				str = str.SubString(0, str.Length() - 1);
+				var typeNode = TypeNode.Generate(str);
+
+				var type = scope.OwnerMethod.Owner.GetType(typeNode);
+
+				return type;
+			}
+
+			var typeNode = new TypeNode(_field);
+			var type = type1.GetType(typeNode);
+
+			return type;
+		}
+
+		string GenerateTypeString()
+		{
+			var first = _expr.GenerateTypeString();
+			if (first == "")
+				return "";
+
+			return first + "." + _field;
+		}
+	}
+
+
+
+	/** Array access expression */
+	class ArrayAccessExpressionNode : ExpressionNode
+	{
+		new(ExpressionNode expr, ExpressionNode index)
+		{
+			_exprType = ExpressionType.ArrayAccess;
+			_expr = expr;
+			_index = index;
+		}
+
+		ExpressionNode Expr : private _expr
+		{
+			get return _expr;
+		}
+		ExpressionNode Index : private _index
+		{
+			get return _index;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			var exprType = _expr.GetTypeOf(scope, parser);
+			if (exprType == Interface.ObjectType)
+				return Interface.ObjectType;
+
+			if (exprType == Interface.StringType)
+				return Interface.CharType;
+
+			if (!exprType)
+				return null;
+
+			if (!exprType.IsArray() && !exprType.IsMap())
+				return null;
+
+			if (exprType.IsArray())
+				return ((ArrayType)exprType).Elem;
+			else if (exprType.IsMap())
+				return ((MapType)exprType).Elem;
+
+			return null;
+		}
+	}
+
+	/** New expression node */
+	class NewExpressionNode : ExpressionNode
+	{
+		new(TypeNode type)
+		{
+			_exprType = ExpressionType.New;
+			_newType = type;
+		}
+
+		TypeNode NewType : private _newType
+		{
+			get return _newType;
+		}
+
+		ExpressionNode[] ArgList : private _argList
+		{
+			get return _argList;
+			set _argList = value;
+		}
+
+		bool IsNative : private _isNative
+		{
+			get return _isNative;
+			set _isNative = value;
+		}
+
+		// Creates a call expression so we can find the right constructor
+		CallExpressionNode CreateCall()
+		{
+			var call = new CallExpressionNode("_New");
+			call.ArgList = _argList;
+
+			return call;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			if (_isNative)
+				return Interface.ObjectType;
+
+			var found = scope.OwnerMethod.Owner.GetType(_newType);
+
+			if (found)
+				return found;
+		}
+	}
+
+
+	/** Call expression node */
+	class CallExpressionNode : ExpressionNode
+	{
+		new(string name)
+		{
+			_exprType = ExpressionType.Call;
+			_name = name;
+			_argList = [];
+		}
+
+		string Name : protected _name
+		{
+			get return _name;
+		}
+
+		string Signature(Scope scope)
+		{
+			var sig = _name + "(";
+
+			if (_argList && _argList.Length() > 0)
+			{
+				var pType = _argList[0].GetTypeOf(scope);
+				if (pType) sig += pType.FullName; else sig += "unknown";
+
+				for (int i = 1; i < _argList.Length(); i++)
+				{
+					pType = _argList[i].GetTypeOf(scope);
+				if (pType) sig += "," + pType.FullName; else sig += ",unknown";
+				}
+			}
+
+			return sig + ")";
+		}
+
+		bool IsNative : protected _isNative
+		{
+			get return _isNative;
+			set _isNative = value;
+		}
+
+		ExpressionNode[] ArgList : protected _argList
+		{
+			get return _argList;
+			set _argList = value;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			if (_isNative)
+				return Interface.ObjectType;
+
+			var owner = scope.OwnerMethod.Owner;
+
+			var found = owner.GetMethod(this, scope, function(Method[] competes) {
+				if (parser)
+				{
+					var list = "";
+					var count = 0;
+					foreach (var method in competes)
+					{
+						if (count > 0) list += ", ";
+						list += method.Signature();
+						count++;
+					}
+					parser.Error("Ambiguous method call between " + list, this);
+				}
+			});
+
+			if (found)
+				return found.Type;
+
+
+			// Maybe it's a local function
+			var scopeFunc = scope.GetItem(_name);
+			if (scopeFunc)
+			{
+				var sType = scopeFunc.ItemType;
+
+				if (!sType)
+					return null;
+
+				if (sType == Interface.ObjectType)
+					return sType;
+
+				if (sType.IsFunction())
+					return ((FunctionType)sType).ReturnType;
+			}
+
+			// Maybe it's a field function
+			var field = scope.OwnerMethod.Owner.GetMember(_name);
+			if (field && field.Type.IsFunction())
+				return ((FunctionType)field.Type).ReturnType;
+
+			return null;
+		}
+
+		string CallSignature(Scope scope)
+		{
+			var callSignature = _name + "(";
+
+			int count = 0;
+			foreach (var arg in _argList)
+			{
+				if (count > 0) callSignature += ", ";
+				var argType = arg.GetTypeOf(scope, null);
+				if (argType)
+					callSignature += argType.Signature();
+				else
+					callSignature += "<unknown>";
+				count++;
+			}
+
+			callSignature += ")";
+			return callSignature;
+		}
+	}
+
+
+	/** Method call expression */
+	class MethodCallExpressionNode : ExpressionNode
+	{
+		new(ExpressionNode expr, CallExpressionNode call)
+		{
+			_exprType = ExpressionType.MethodCall;
+			_expr = expr;
+			_call = call;
+		}
+
+		ExpressionNode Expr : private _expr
+		{
+			get return _expr;
+		}
+		CallExpressionNode Call : private _call
+		{
+			get return _call;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			var exprType = _expr.GetTypeOf(scope, parser);
+			if (exprType == Interface.ObjectType)
+				return Interface.ObjectType;
+
+			if (!exprType || exprType == Interface.NullType)
+			{
+				exprType = _expr.TryGetType(scope);
+
+				if (!exprType)
+					return null;
+			}
+
+			var found = exprType.GetMethod(_call, scope, function(Method[] competes) {
+				if (parser)
+				{
+					var list = "";
+					var count = 0;
+					foreach (var method in competes)
+					{
+						if (count > 0) list += ", ";
+						list += method.Signature();
+						count++;
+					}
+					parser.Error("Ambiguous method call between " + list, _call);
+				}
+			});
+
+			if (found)
+				return found.Type;
+
+			var field = exprType.GetMember(_call.Name);
+			if (field && field.Type.IsFunction())
+				return ((FunctionType)field.Type).ReturnType;
+
+			return null;
+		}
+	}
+
+
+	/** Complex call. E.g. foo[0](1, 2, 3) */
+	class ComplexCallExpressionNode : ExpressionNode
+	{
+		new(ExpressionNode obj)
+		{
+			_exprType = ExpressionType.ComplexCall;
+			_obj = obj;
+		}
+
+		ExpressionNode Object : private _obj
+		{
+			get return _obj;
+		}
+
+		ExpressionNode[] ArgList : private _argList
+		{
+			get return _argList;
+			set _argList = value;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			var objType = _obj.GetTypeOf(scope, parser);
+			if (!objType)
+				return null;
+
+			if (objType == Interface.ObjectType)
+				return Interface.ObjectType;
+
+			if (objType.IsFunction())
+				return ((FunctionType)objType).ReturnType;
+
+			return null;
+		}
+	}
+
+
+	/** Base class call */
+	class BaseCallExpressionNode : CallExpressionNode
+	{
+		new(string name) : base(name)
+		{
+			_exprType = ExpressionType.BaseCall;
+		}
+	}
+
+
+
+	/** Function expression node */
+	class FunctionExpressionNode : ExpressionNode
+	{
+		new()
+		{
+			_exprType = ExpressionType.Function;
+			_params = [];
+		}
+
+		array Params : private _params
+		{
+			get return _params;
+		}
+
+		void AddParam(TypeNode type, string name)
+		{
+			_params.Add({type: type, name: name});
+		}
+
+		TypeNode ReturnType : private _return
+		{
+			get return _return;
+			set _return = value;
+		}
+
+		BlockNode Block : private _block
+		{
+			get return _block;
+			set _block = value;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			var funcType = new FunctionType();
+			if (_return)
+				funcType.ReturnType = scope.OwnerMethod.Owner.GetType(_return);
+
+			foreach (var param in _params)
+			{
+				var pTypeNode = (TypeNode)param.type;
+				var pName = (string)param.name;
+
+				var pType = scope.OwnerMethod.Owner.GetType(pTypeNode);
+				funcType.AddParam(pType, pName);
+			}
+
+			return funcType;
+		}
+	}
+
+
+	/** Operator node */
+	class OperatorExpressionNode : ExpressionNode
+	{
+		new(OpType op)
+		{
+			_exprType = ExpressionType.Op;
+			_op = op;
+		}
+
+		OpType Operator : protected _op
+		{
+			get return _op;
+		}
+
+		ExpressionNode Expression1 : protected _expr1
+		{
+			get return _expr1;
+			set _expr1 = value;
+		}
+
+		ExpressionNode Expression2 : protected _expr2
+		{
+			get return _expr2;
+			set _expr2 = value;
+		}
+
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			// Conditional - doesn't seem to be working
+			// in CondOpExpressionNode.GetTypeOf() override
+
+			var t1 = _expr1.GetTypeOf(scope, parser);
+			if (!t1 || t1 == Interface.VoidType)	return null;
+
+			var t2 = _expr2.GetTypeOf(scope, parser);
+			if (!t2 || t2 == Interface.VoidType)	return null;
+
+			// Binary operations always returns bool
+			switch (_op)
+			{
+				case OpType.CmpGT:
+				case OpType.CmpLT:
+				case OpType.CmpGTE:
+				case OpType.CmpLTE:
+				case OpType.CmpEq:
+				case OpType.CmpNEq:
+				case OpType.And:
+				case OpType.Or:
+					return Interface.BoolType;
+			}
+
+			// Objects always return objects (unless binary operation)
+			if (t1 == Interface.ObjectType || t2 == Interface.ObjectType)
+				return Interface.ObjectType;
+
+			switch (_op)
+			{
+				case OpType.Mult:
+				case OpType.Div:
+				case OpType.Exp:
+				case OpType.Sub:
+				case OpType.Mod:
+				{
+					if (t1 != Interface.IntType && t1 != Interface.FloatType)	return null;
+					if (t2 != Interface.IntType && t2 != Interface.FloatType)	return null;
+
+					if (t1 == Interface.FloatType || t2 == Interface.FloatType)
+						return Interface.FloatType;
+					else
+						return Interface.IntType;
+
+					break;
+				}
+
+				case OpType.Add:
+				{
+					if (t1 != Interface.IntType && t1 != Interface.FloatType && t1 != Interface.CharType && t1 != Interface.StringType)	return null;
+					if (t2 != Interface.IntType && t2 != Interface.FloatType && t2 != Interface.CharType && t2 != Interface.StringType)	return null;
+
+					if (t1 == Interface.StringType || t2 == Interface.StringType)
+						return Interface.StringType;
+					else if (t1 == Interface.FloatType || t2 == Interface.FloatType)
+						return Interface.FloatType;
+					else
+						return Interface.IntType;
+
+					break;
+				}
+
+				case OpType.Assign:
+				case OpType.AAdd:
+				case OpType.ASub:
+				case OpType.AMul:
+				case OpType.ADiv:
+				case OpType.AExp:
+				case OpType.AMod:
+				{
+					if (t2.DistanceTo(t1) < 0)
+						return null;
+					else
+						return t2;
+				}
+
+				default:
+					break;
+			}
+
+			return null;
+		}
+	}
+
+
+	/** Prefix operator */
+	class PreOpExpressionNode : OperatorExpressionNode
+	{
+		new(OpType op, ExpressionNode expr) : base(op)
+		{
+			_exprType = ExpressionType.PreOp;
+			_expr1 = expr;
+		}
+
+		ExpressionNode Expression
+		{
+			get return _expr1;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			return _expr1.GetTypeOf(scope, parser);
+		}
+	}
+
+
+	/** Postfix operator */
+	class PostOpExpressionNode : OperatorExpressionNode
+	{
+		new(OpType op, ExpressionNode expr) : base(op)
+		{
+			_exprType = ExpressionType.PostOp;
+			_expr1 = expr;
+		}
+
+		ExpressionNode Expression
+		{
+			get return _expr1;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			return _expr1.GetTypeOf(scope, parser);
+		}
+	}
+
+
+	/** Conditional operator */
+	class CondOpExpressionNode : OperatorExpressionNode
+	{
+		new() : base(OpType.Cond)
+		{
+			_exprType = ExpressionType.CondOp;
+		}
+
+		ExpressionNode Expression3 : private _expr3
+		{
+			get return _expr3;
+			set _expr3 = value;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			var t1 = _expr2.GetTypeOf(scope, parser);
+			var t2 = _expr3.GetTypeOf(scope, parser);
+
+			return t1.GetCommon(t2);
+		}
+	}
+
+	/** Parentheses expression */
+	class ParExpressionNode : ExpressionNode
+	{
+		new(ExpressionNode sub)
+		{
+			_exprType = ExpressionType.Par;
+			_sub = sub;
+		}
+
+		ExpressionNode SubExpr : private _sub
+		{
+			get return _sub;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			return _sub.GetTypeOf(scope, parser);
+		}
+	}
+
+
+	/** Literal array expression */
+	class LitArrayExpressionNode : ExpressionNode
+	{
+		new()
+		{
+			_exprType = ExpressionType.LitArray;
+			_items = [];
+		}
+
+		ExpressionNode[] Items : private _items
+		{
+			get return _items;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			if (_items.Length() == 0)
+				return Interface.ObjectType.ArrayOf;
+
+			var common = _items[0].GetTypeOf(scope, parser);
+
+			for (int i = 1; i < _items.Length(); i++)
+			{
+				var itemType = _items[i].GetTypeOf(scope, parser);
+
+				if (itemType)
+				{
+					var common = itemType.GetCommon(common);
+					if (!common)
+					{
+						common = Interface.ObjectType;
+						break;
+					}
+				}
+				else
+				{
+					common = Interface.ObjectType;
+					break;
+				}
+			}
+
+			if (common)
+				return common.ArrayOf;
+			
+			return null;
+		}
+	}
+
+
+	/** Literal map expression */
+	class LitMapExpressionNode : ExpressionNode
+	{
+		new()
+		{
+			_exprType = ExpressionType.Map;
+			_items = {};
+		}
+
+		map<ExpressionNode> Items : private _items
+		{
+			get return _items;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			var keys = _items.Keys();
+
+			// We only return a map if there are no keys
+			if (keys.Length() == 0)
+				return Interface.ObjectType.MapOf;
+
+
+			var inlineType = new InlineInterface();
+
+			foreach (var key in keys)
+			{
+				var itemType = _items[key].GetTypeOf(scope, parser);
+
+				if (itemType)
+				{
+					/*if (itemType.IsFunction())
+					{
+						var functionType = (FunctionType)itemType;
+
+						var methodMember = new Method(functionType.ReturnType, key);
+						inlineType.AddMember(methodMember);
+
+						int paramCount = 0;
+						foreach (var fparam in functionType.ParamTypes)
+						{
+							methodMember.AddParameter(fparam, functionType.ParamNames[paramCount]);
+							paramCount++;
+						}
+					}
+					else*/
+					{
+						var fieldMember = new Field(itemType, key);
+						inlineType.AddMember(fieldMember);
+					}
+				}
+			}
+
+			return inlineType;
+
+			// This returns a map type
+			// However, since inline interfaces were introduced, we're not
+			//    going to return an interface type instead
+			// Keeping for posteriority in case everything breaks
+
+			/*var keys = _items.Keys();
+			if (keys.Length() == 0)
+				return Interface.ObjectType.MapOf;
+
+			var common = _items[keys[0]].GetTypeOf(scope, parser);
+
+			for (int i = 1; i < keys.Length(); i++)
+			{
+				var itemType = _items[keys[i]].GetTypeOf(scope, parser);
+
+				if (itemType)
+				{
+					common = itemType.GetCommon(common);
+					if (!common)
+					{
+						common = Interface.ObjectType;
+						break;
+					}
+				}
+				else
+				{
+					common = Interface.ObjectType;
+					break;
+				}
+			}
+
+			if (common)
+				return common.MapOf;
+			
+			return null;*/
+		}
+	}
+
+
+	/** Typecast expression */
+	class TypecastExpressionNode : ExpressionNode
+	{
+		new(TypeNode type, ExpressionNode expr)
+		{
+			_exprType = ExpressionType.Typecast;
+			_type = type;
+			_expr = expr;
+		}
+
+		TypeNode ToType : private _type
+		{
+			get return _type;
+		}
+		ExpressionNode Expr : private _expr
+		{
+			get return _expr;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			return scope.OwnerMethod.Owner.GetType(_type);
+		}
+	}
+
+
+	/** Assembly expression */
+	class AssemblyExpressionNode : ExpressionNode
+	{
+		new(string assembly)
+		{
+			_exprType = ExpressionType.Assembly;
+			_assembly = assembly;
+		}
+
+		string Assembly : private _assembly
+		{
+			get return _assembly;
+		}
+	}
+
+
+	/** HTML expression */
+	class HTMLExpressionNode : ExpressionNode
+	{
+		new()
+		{
+			_exprType = ExpressionType.HTML;
+			_children = [];
+			_attr = {};
+		}
+
+		new(TypeNode elem)
+		{
+			_exprType = ExpressionType.HTML;
+			_elem = elem;
+			_children = [];
+			_attr = {};
+		}
+		new(ExpressionNode elemExpression)
+		{
+			_exprType = ExpressionType.HTML;
+			_elemExpr = elemExpression;
+			_children = [];
+			_attr = {};
+		}
+
+		static string[] BasicTags : private _basicTags = null
+		{
+			get
+			{
+				if (!_basicTags)
+				{
+					_basicTags = [
+						"none",
+
+						"html",
+						"head",
+						"title",
+						"base",
+						"link",
+						"meta",
+						"style",
+						"script",
+						"noscript",
+						"body",
+						"section",
+						"nav",
+						"article",
+						"aside",
+						"h1",
+						"h2",
+						"h3",
+						"h4",
+						"h5",
+						"h6",
+						"hgroup",
+						"header",
+						"footer",
+						"address",
+						"p",
+						"hr",
+						"pre",
+						"blockquote",
+						"ol",
+						"ul",
+						"li",
+						"dl",
+						"dt",
+						"dd",
+						"figure",
+						"figcaption",
+						"div",
+						"a",
+						"em",
+						"strong",
+						"small",
+						"s",
+						"cite",
+						"q",
+						"dfn",
+						"abbr",
+						"data",
+						"time",
+						"code",
+						"var",
+						"samp",
+						"kbd",
+						"sub",
+						"sup",
+						"i",
+						"b",
+						"u",
+						"mark",
+						"ruby",
+						"rt",
+						"rp",
+						"bdi",
+						"bdo",
+						"span",
+						"br",
+						"wbr",
+						"ins",
+						"del",
+						"img",
+						"iframe",
+						"embed",
+						"object",
+						"param",
+						"video",
+						"audio",
+						"source",
+						"track",
+						"canvas",
+						"map",
+						"area",
+						"table",
+						"caption",
+						"colgroup",
+						"col",
+						"tbody",
+						"thead",
+						"tfoot",
+						"tr",
+						"td",
+						"th",
+						"form",
+						"fieldset",
+						"legend",
+						"label",
+						"input",
+						"button",
+						"select",
+						"datalist",
+						"optgroup",
+						"option",
+						"textarea",
+						"keygen",
+						"output",
+						"progress",
+						"meter",
+						"details",
+						"summary",
+						"command",
+						"menu",
+						"dialog",
+
+						"center"
+					];
+				}
+
+				return _basicTags;
+			}
+		}
+
+
+		bool IsBasic()
+		{
+			if (!_elem)
+				return false;
+			
+			foreach (var tag in BasicTags)
+				if (tag == _elem.Name)
+					return true;
+
+			return false;
+		}
+
+
+		TypeNode Elem : private _elem
+		{
+			get return _elem;
+		}
+		ExpressionNode ElemExpression : private _elemExpr
+		{
+			get return _elemExpr;
+		}
+
+		HTMLExpressionNode[] Children : private _children
+		{
+			get return _children;
+		}
+
+		void AddChild(HTMLExpressionNode child)
+		{
+			_children.Add(child);
+		}
+
+		map<ExpressionNode> Attributes : private _attr
+		{
+			get return _attr;
+		}
+
+		ExpressionNode AttributeClone : private _attrClone
+		{
+			get return _attrClone;
+			set _attrClone = value;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			return (Class)scope.OwnerMethod.Owner.GetRootNamespace().GetNamespaceBySignature("std").GetNamespaceBySignature("html").GetNamespaceBySignature("HTMLElement");
+		}
+	}
+
+	/** HTML text expression */
+	class HTMLTextExpressionNode : HTMLExpressionNode
+	{
+		new(ExpressionNode text) : base()
+		{
+			_exprType = ExpressionType.HTMLText;
+			_text = text;
+		}
+
+		ExpressionNode Text : private _text
+		{
+			get return _text;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			return _text.GetTypeOf(scope, parser);
+		}
+	}
+
+	/** HTML inline code expression */
+	class HTMLCodeExpressionNode : HTMLExpressionNode
+	{
+		new(ExpressionNode code) : base()
+		{
+			_exprType = ExpressionType.HTMLCode;
+			_code = code;
+		}
+
+		ExpressionNode Code : private _code
+		{
+			get return _code;
+		}
+
+		Interface GetTypeOf(Scope scope, Parser parser = null)
+		{
+			return _code.GetTypeOf(scope, parser);
+		}
+	}
+
+
+}
+
+
+
+
+
+
+
+
